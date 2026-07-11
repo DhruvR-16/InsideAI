@@ -1,0 +1,35 @@
+# Local environment configs
+.env
+
+# Project specifications/docs not to be committed
+Inside-AI-Project-Plan.md
+
+# OS specific files
+.DS_Store
+Thumbs.db
+
+# Python backend files
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+.venv/
+venv/
+backend/__pycache__/
+backend/.venv/
+backend/chroma_db/
+
+# Frontend files
+frontend/node_modules/
+frontend/dist/
+frontend/.next/
+frontend/out/
+
+# IDE files
+.vscode/
+.idea/
+*.suo
+*.ntvs*
+*.njsproj
+*.sln
+*.swp
