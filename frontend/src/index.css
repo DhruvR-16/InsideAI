@@ -697,16 +697,11 @@ body {
 
 /* Inspector Panel */
 .inspector-panel {
-  position: absolute;
-  top: 1.25rem;
-  right: 1.25rem;
-  bottom: 1.25rem;
+  position: relative;
+  height: 100%;
   width: 420px;
-  z-index: 15;
   background: var(--bg-panel);
-  border: 1px solid var(--border-light);
-  border-radius: 12px;
-  box-shadow: -5px 0 25px rgba(0, 0, 0, 0.05), 0 10px 40px rgba(0, 0, 0, 0.03);
+  border-left: 1px solid var(--border-light);
   display: flex;
   flex-direction: column;
   overflow: hidden;

@@ -459,8 +459,13 @@ export default function App() {
         </div>
       </header>
 
-      {/* Main Layout */}
-      <main className="main-layout">
+      <main 
+        className="main-layout"
+        style={{
+          gridTemplateColumns: selectedNode ? '460px 1fr 420px' : '460px 1fr',
+          transition: 'grid-template-columns 0.3s cubic-bezier(0.25, 0.8, 0.25, 1)'
+        }}
+      >
         
         {/* Left Panel: Continuous Chatbot */}
         <section className="chat-column">
@@ -620,15 +625,15 @@ export default function App() {
             onNodeSelect={handleNodeSelect}
             selectedNodeId={selectedNode?.id}
           />
-
-          {/* Inspector Panel */}
-          {selectedNode && (
-            <InspectorPanel 
-              node={selectedNode} 
-              onClose={() => setSelectedNode(null)} 
-            />
-          )}
         </section>
+
+        {/* Inspector Panel - Rendered inline in the 3rd column */}
+        {selectedNode && (
+          <InspectorPanel 
+            node={selectedNode} 
+            onClose={() => setSelectedNode(null)} 
+          />
+        )}
       </main>
     </div>
   );
