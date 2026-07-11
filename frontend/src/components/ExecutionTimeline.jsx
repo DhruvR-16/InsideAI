@@ -32,7 +32,11 @@ export default function ExecutionTimeline({ events, currentStage, running, query
     let rawPayload = undefined;
     
     if (completeEvent) {
-      status = 'success';
+      if (completeEvent.output?.skipped) {
+        status = 'skipped';
+      } else {
+        status = 'success';
+      }
       duration = completeEvent.duration_ms;
       output = completeEvent.output;
       rawPayload = completeEvent;
@@ -113,6 +117,14 @@ export default function ExecutionTimeline({ events, currentStage, running, query
   const renderStageOutput = (stageId, state) => {
     const { output, status, rawPayload } = state;
     if (!output || status === 'idle' || status === 'running') return null;
+
+    if (status === 'skipped') {
+      return (
+        <div className="timeline-card-output" style={{ fontStyle: 'italic', fontSize: '0.72rem', color: '#86868b' }}>
+          {output.reason || 'Stage skipped — simple query fast-track.'}
+        </div>
+      );
+    }
 
     switch (stageId) {
       case 'intent_analyzer':
@@ -296,6 +308,14 @@ export default function ExecutionTimeline({ events, currentStage, running, query
 
   const getStageHeaderStatus = (stageId, state) => {
     const { status, duration } = state;
+    if (status === 'skipped') {
+      return (
+        <span style={{ fontSize: '0.64rem', color: '#86868b', marginLeft: 'auto', display: 'flex', alignItems: 'center', gap: 4 }}>
+          <ArrowRight size={12} style={{ color: '#86868b' }} />
+          <span>Skipped (fast-track)</span>
+        </span>
+      );
+    }
     if (status === 'success') {
       return (
         <span style={{ fontSize: '0.64rem', color: 'var(--text-secondary)', marginLeft: 'auto', display: 'flex', alignItems: 'center', gap: 4 }}>
@@ -372,6 +392,10 @@ export default function ExecutionTimeline({ events, currentStage, running, query
           borderStyle = '1.5px solid var(--accent-color)';
           cardBg = '#ffffff';
           opacity = 1;
+        } else if (state.status === 'skipped') {
+          borderStyle = '1px dashed #cbcbcd';
+          cardBg = '#fafafa';
+          opacity = 0.7;
         } else if (state.status === 'success' || state.status === 'warning') {
           borderStyle = '1px solid var(--border-light)';
           cardBg = '#ffffff';
@@ -386,7 +410,7 @@ export default function ExecutionTimeline({ events, currentStage, running, query
                 width: 22,
                 height: 22,
                 borderRadius: '50%',
-                backgroundColor: state.status === 'running' ? 'var(--accent-color)' : (state.status === 'success' ? 'var(--success-color)' : (state.status === 'warning' ? 'var(--warning-color)' : '#cbcbcd')),
+                backgroundColor: state.status === 'running' ? 'var(--accent-color)' : (state.status === 'success' ? 'var(--success-color)' : (state.status === 'warning' ? 'var(--warning-color)' : (state.status === 'skipped' ? '#a1a1a3' : '#cbcbcd'))),
                 display: 'flex',
                 alignItems: 'center',
                 justifyContent: 'center',
@@ -401,7 +425,7 @@ export default function ExecutionTimeline({ events, currentStage, running, query
                 <div style={{ 
                   width: 2, 
                   flex: 1, 
-                  backgroundColor: (state.status === 'success' || state.status === 'warning') ? 'var(--success-color)' : 'var(--border-light)', 
+                  backgroundColor: (state.status === 'success' || state.status === 'warning' || state.status === 'skipped') ? ((state.status === 'skipped') ? '#cbcbcd' : 'var(--success-color)') : 'var(--border-light)', 
                   minHeight: 20,
                   transition: 'background-color 0.25s'
                 }} />

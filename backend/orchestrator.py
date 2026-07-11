@@ -495,7 +495,8 @@ async def generate_response_stream(
     async for token in stream_response:
         yield token
 
-# --- Internal Pipeline Implementation async def _run_pipeline_internal(
+# --- Internal Pipeline Implementation ---
+async def _run_pipeline_internal(
     query: str,
     session_id: str,
     event_callback: Callable[[Dict[str, Any]], Any]
@@ -568,41 +569,93 @@ async def generate_response_stream(
     )
     memory, kb = await asyncio.gather(memory_task, kb_task)
     
-    # 4. Planner (Iteration 1)
-    plan = await run_stage(
-        "planner", 
-        lambda: generate_plan(query, intent, memory, kb)
-    )
-    
-    # 5. Logic / Critic (Iteration 1)
-    critique = await run_stage(
-        "logic_critic", 
-        lambda: critique_plan(query, intent, kb, plan)
-    )
-    
-    # Revision cycle
-    if not critique.plan_approved:
-        print("Plan rejected by critic. Starting revision cycle...")
-        initial_plan_dump = plan.model_dump() if hasattr(plan, "model_dump") else {}
-        initial_critique_dump = critique.model_dump() if hasattr(critique, "model_dump") else {}
-        
-        revised_plan = await run_stage(
-            "planner_revision", 
-            lambda: generate_plan(
-                query, intent, memory, kb, 
-                critique_feedback="\n".join(critique.issues_found)
-            ),
-            extra_complete_metadata={"initial_plan": initial_plan_dump}
+    # --- Fast-track for simple queries ---
+    # If the intent analyzer classified this as "simple", skip the
+    # planning and critic stages entirely and jump straight to the
+    # writer.  This saves 4-5 LLM round-trips for questions like
+    # "What is AI?" while still showing the intent + retrieval stages.
+    if intent.complexity == "simple":
+        # Emit dummy planner + critic complete events so the
+        # timeline / graph still lights those nodes up as "skipped".
+        for skip_stage in ["planner", "logic_critic"]:
+            await event_callback({
+                "event": "stage_start",
+                "stage": skip_stage,
+                "model_slot_id": slot_id,
+                "timestamp": time.time() * 1000
+            })
+            await event_callback({
+                "event": "stage_complete",
+                "stage": skip_stage,
+                "model_slot_id": slot_id,
+                "duration_ms": 0,
+                "output": {
+                    "skipped": True,
+                    "reason": "Simple query — fast-tracked to writer"
+                } if skip_stage == "planner" else {
+                    "plan_approved": True,
+                    "confidence_score": 95,
+                    "confidence_rationale": "Simple query — auto-approved, no critique needed.",
+                    "issues_found": [],
+                    "skipped": True
+                },
+                "timestamp": time.time() * 1000,
+                "system_prompt": None,
+                "user_prompt": None,
+                "raw_llm_response": None,
+                "active_key_masked": last_key_used.get(),
+                "provider_used": "Skipped"
+            })
+
+        # Build a lightweight plan object for the writer
+        plan = Plan(
+            approach="Direct answer — simple query fast-track",
+            sections=[{"heading": "Answer", "key_points": [intent.core_question]}],
+            estimated_length="short"
+        )
+        critique = Critique(
+            plan_approved=True,
+            confidence_score=95,
+            confidence_rationale="Simple query — auto-approved.",
+            issues_found=[]
+        )
+    else:
+        # --- Full planning + critic pipeline for moderate/complex queries ---
+        # 4. Planner (Iteration 1)
+        plan = await run_stage(
+            "planner", 
+            lambda: generate_plan(query, intent, memory, kb)
         )
         
-        revised_critique = await run_stage(
-            "logic_critic_revision", 
-            lambda: critique_plan(query, intent, kb, revised_plan),
-            extra_complete_metadata={"initial_critique": initial_critique_dump}
+        # 5. Logic / Critic (Iteration 1)
+        critique = await run_stage(
+            "logic_critic", 
+            lambda: critique_plan(query, intent, kb, plan)
         )
         
-        plan = revised_plan
-        critique = revised_critique
+        # Revision cycle
+        if not critique.plan_approved:
+            print("Plan rejected by critic. Starting revision cycle...")
+            initial_plan_dump = plan.model_dump() if hasattr(plan, "model_dump") else {}
+            initial_critique_dump = critique.model_dump() if hasattr(critique, "model_dump") else {}
+            
+            revised_plan = await run_stage(
+                "planner_revision", 
+                lambda: generate_plan(
+                    query, intent, memory, kb, 
+                    critique_feedback="\n".join(critique.issues_found)
+                ),
+                extra_complete_metadata={"initial_plan": initial_plan_dump}
+            )
+            
+            revised_critique = await run_stage(
+                "logic_critic_revision", 
+                lambda: critique_plan(query, intent, kb, revised_plan),
+                extra_complete_metadata={"initial_critique": initial_critique_dump}
+            )
+            
+            plan = revised_plan
+            critique = revised_critique
     
     # 6. Writer (Streaming)
     writer_start_time = time.time()
