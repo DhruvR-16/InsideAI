@@ -62,6 +62,7 @@ export default function App() {
 
   // Dynamic slots: 0 = Llama 3.1 8B, 1 = Gemma 2 9B, 2 = Llama 3.2 3B
   const [activeModelSlot, setActiveModelSlot] = useState(0);
+  const [compareMode, setCompareMode] = useState(false);
   const [selectedMessageId, setSelectedMessageId] = useState(null);
   
   // Floating panels state
@@ -389,6 +390,29 @@ export default function App() {
           <span className="version-badge">Live Transparent pipeline</span>
         </div>
         <div style={{ display: 'flex', alignItems: 'center', gap: 12 }}>
+          {/* Compare Mode Toggle Button */}
+          <button
+            onClick={() => setCompareMode(prev => !prev)}
+            style={{
+              display: 'flex',
+              alignItems: 'center',
+              gap: 6,
+              background: compareMode ? 'var(--accent-light)' : 'none',
+              border: compareMode ? '1px solid var(--accent-color)' : '1px solid var(--border-light)',
+              borderRadius: '6px',
+              padding: '6px 12px',
+              cursor: 'pointer',
+              fontSize: '0.72rem',
+              fontWeight: 600,
+              color: compareMode ? 'var(--accent-color)' : 'var(--text-secondary)',
+              transition: 'all 0.2s',
+              outline: 'none'
+            }}
+          >
+            <Sparkles size={12} style={{ color: compareMode ? 'var(--accent-color)' : 'var(--text-muted)' }} />
+            <span>{compareMode ? 'Arena View' : 'Single View'}</span>
+          </button>
+
           <input
             type="password"
             value={userApiKey}
@@ -429,8 +453,14 @@ export default function App() {
         </div>
       </header>
 
-      {/* Main Layout */}
-      <main className="main-layout">
+      {/* Main Layout - Grid layout expands dynamically in Compare Mode */}
+      <main 
+        className="main-layout" 
+        style={{ 
+          gridTemplateColumns: compareMode ? '820px 1fr' : '380px 1fr',
+          transition: 'grid-template-columns 0.3s cubic-bezier(0.25, 0.8, 0.25, 1)'
+        }}
+      >
         
         {/* Left Panel: Continuous Chatbot */}
         <section className="chat-column">
@@ -469,102 +499,195 @@ export default function App() {
               chatMessages.map((msg) => (
                 <div key={msg.id} className={`chat-message-row ${msg.role}`}>
                   <div 
-                    className={`chat-bubble ${msg.role} ${selectedMessageId === msg.id ? 'selected-chat-bubble' : ''}`}
+                    className={msg.role === 'user' ? 'chat-bubble user' : (compareMode ? 'compare-bubble-container' : `chat-bubble assistant ${selectedMessageId === msg.id ? 'selected-chat-bubble' : ''}`)}
                     onClick={() => handleSelectMessageTrace(msg)}
                     style={{ 
                       cursor: msg.role === 'assistant' ? 'pointer' : 'default',
-                      border: selectedMessageId === msg.id ? '1px solid var(--accent-color)' : ''
+                      border: !compareMode && selectedMessageId === msg.id ? '1px solid var(--accent-color)' : '',
+                      width: compareMode && msg.role === 'assistant' ? '100%' : 'auto',
+                      background: compareMode && msg.role === 'assistant' ? 'none' : undefined,
+                      padding: compareMode && msg.role === 'assistant' ? '0' : undefined,
+                      boxShadow: compareMode && msg.role === 'assistant' ? 'none' : undefined,
                     }}
                   >
                     {msg.role === 'user' ? (
                       <p style={{ margin: 0 }}>{msg.content}</p>
                     ) : (
-                      <>
-                        {/* Model Comparison Tabs inside Chat Bubble */}
-                        <div className="model-tabs-bar" onClick={(e) => e.stopPropagation()}>
+                      compareMode ? (
+                        <div className="compare-mode-row" style={{ display: 'flex', gap: 12, width: '100%', padding: '4px 0' }}>
                           {[
                             { name: "Llama 3.1 8B", slotId: 0 },
                             { name: "Gemma 2 9B", slotId: 1 },
                             { name: "Llama 3.2 3B", slotId: 2 }
                           ].map((tab) => {
                             const isCurrent = activeModelSlot === tab.slotId;
-                            const slotStage = msg[`currentStage${tab.slotId}`];
-                            const slotRunning = msg.running && slotStage !== 'complete' && slotStage !== 'error';
+                            const text = msg[`text${tab.slotId}`] || '';
+                            const stage = msg[`currentStage${tab.slotId}`] || 'idle';
+                            const isRunningSlot = msg.running && stage !== 'complete' && stage !== 'error';
+                            const totalTime = msg[`totalTime${tab.slotId}`];
+                            const confidence = msg[`confidence${tab.slotId}`];
                             
                             let dotBgColor = '#cbcbcd';
                             let isPulsing = false;
                             
-                            if (slotRunning) {
+                            if (isRunningSlot) {
                               dotBgColor = 'var(--accent-color)';
                               isPulsing = true;
-                            } else if (slotStage === 'complete') {
+                            } else if (stage === 'complete') {
                               dotBgColor = 'var(--success-color)';
-                            } else if (slotStage === 'error') {
+                            } else if (stage === 'error') {
                               dotBgColor = 'var(--error-color)';
                             }
                             
                             return (
-                              <button
+                              <div
                                 key={tab.slotId}
-                                className={`model-tab-btn ${isCurrent ? 'active' : ''}`}
-                                onClick={() => {
+                                className={`chat-bubble assistant compare-bubble ${isCurrent ? 'selected-chat-bubble' : ''}`}
+                                onClick={(e) => {
+                                  e.stopPropagation();
                                   setActiveModelSlot(tab.slotId);
                                   setSelectedMessageId(msg.id);
                                 }}
+                                style={{
+                                  flex: 1,
+                                  minWidth: 0,
+                                  border: isCurrent ? '1.5px solid var(--accent-color)' : '1px solid var(--border-light)',
+                                  borderRadius: '12px',
+                                  background: '#ffffff',
+                                  padding: '12px',
+                                  boxShadow: '0 4px 15px rgba(0,0,0,0.02)',
+                                  display: 'flex',
+                                  flexDirection: 'column',
+                                  gap: 8,
+                                  transition: 'all 0.2s'
+                                }}
                               >
-                                <span className={`status-dot ${isPulsing ? 'pulsing' : ''}`} style={{ backgroundColor: dotBgColor }} />
-                                <span>{tab.name}</span>
-                              </button>
+                                {/* Bubble Header */}
+                                <div style={{ display: 'flex', alignItems: 'center', gap: 6, borderBottom: '1px solid var(--border-light)', paddingBottom: 6 }}>
+                                  <span className={`status-dot ${isPulsing ? 'pulsing' : ''}`} style={{ backgroundColor: dotBgColor }} />
+                                  <strong style={{ fontSize: '0.72rem', color: 'var(--text-primary)' }}>{tab.name}</strong>
+                                  <span style={{ fontSize: '0.62rem', color: 'var(--text-muted)', marginLeft: 'auto', textTransform: 'capitalize' }}>
+                                    {stage === 'complete' ? 'Complete' : stage.replace('_', ' ')}
+                                  </span>
+                                </div>
+
+                                {/* Content Area */}
+                                <div style={{ flex: 1 }}>
+                                  {isRunningSlot && !text ? (
+                                    <div className="chat-thinking-indicator" style={{ display: 'flex', alignItems: 'center', gap: 6, fontSize: '0.7rem', color: 'var(--text-secondary)', padding: '10px 0' }}>
+                                      <Loader className="spinner" size={10} style={{ animation: 'spin 2s linear infinite' }} />
+                                      <span>Orchestrating...</span>
+                                    </div>
+                                  ) : (
+                                    <div 
+                                      className="writer-output-markup"
+                                      style={{ fontSize: '0.7rem', lineHeight: '1.4' }}
+                                      dangerouslySetInnerHTML={{ __html: renderMarkdown(text || 'Initializing run...') }}
+                                    />
+                                  )}
+                                </div>
+
+                                {/* Bubble Footer */}
+                                {!msg.running && stage === 'complete' && (
+                                  <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', fontSize: '0.62rem', color: 'var(--text-secondary)', borderTop: '1px solid #f1f1f3', paddingTop: 6, marginTop: 4 }}>
+                                    <span>{totalTime ? `${(totalTime / 1000).toFixed(2)}s` : ''}</span>
+                                    {confidence !== undefined && confidence !== null && (
+                                      <span>Score: {confidence}%</span>
+                                    )}
+                                  </div>
+                                )}
+                              </div>
                             );
                           })}
                         </div>
+                      ) : (
+                        <>
+                          {/* Model Comparison Tabs inside Chat Bubble */}
+                          <div className="model-tabs-bar" onClick={(e) => e.stopPropagation()}>
+                            {[
+                              { name: "Llama 3.1 8B", slotId: 0 },
+                              { name: "Gemma 2 9B", slotId: 1 },
+                              { name: "Llama 3.2 3B", slotId: 2 }
+                            ].map((tab) => {
+                              const isCurrent = activeModelSlot === tab.slotId;
+                              const slotStage = msg[`currentStage${tab.slotId}`];
+                              const slotRunning = msg.running && slotStage !== 'complete' && slotStage !== 'error';
+                              
+                              let dotBgColor = '#cbcbcd';
+                              let isPulsing = false;
+                              
+                              if (slotRunning) {
+                                dotBgColor = 'var(--accent-color)';
+                                isPulsing = true;
+                              } else if (slotStage === 'complete') {
+                                dotBgColor = 'var(--success-color)';
+                              } else if (slotStage === 'error') {
+                                dotBgColor = 'var(--error-color)';
+                              }
+                              
+                              return (
+                                <button
+                                  key={tab.slotId}
+                                  className={`model-tab-btn ${isCurrent ? 'active' : ''}`}
+                                  onClick={() => {
+                                    setActiveModelSlot(tab.slotId);
+                                    setSelectedMessageId(msg.id);
+                                  }}
+                                >
+                                  <span className={`status-dot ${isPulsing ? 'pulsing' : ''}`} style={{ backgroundColor: dotBgColor }} />
+                                  <span>{tab.name}</span>
+                                </button>
+                              );
+                            })}
+                          </div>
 
-                        {/* Slot-specific Content */}
-                        {(() => {
-                          const text = msg[`text${activeModelSlot}`] || '';
-                          const stage = msg[`currentStage${activeModelSlot}`] || 'idle';
-                          const isRunningSlot = msg.running && stage !== 'complete' && stage !== 'error';
-                          
-                          if (isRunningSlot && !text) {
+                          {/* Slot-specific Content */}
+                          {(() => {
+                            const text = msg[`text${activeModelSlot}`] || '';
+                            const stage = msg[`currentStage${activeModelSlot}`] || 'idle';
+                            const isRunningSlot = msg.running && stage !== 'complete' && stage !== 'error';
+                            
+                            if (isRunningSlot && !text) {
+                              return (
+                                <div className="chat-thinking-indicator" style={{ display: 'flex', alignItems: 'center', gap: 6, fontSize: '0.74rem', color: 'var(--text-secondary)', padding: '10px 0' }}>
+                                  <Loader className="spinner" size={12} style={{ animation: 'spin 2s linear infinite' }} />
+                                  <span>Orchestrating pipeline... ({stage === 'idle' ? 'Starting' : stage})</span>
+                                </div>
+                              );
+                            }
+                            
                             return (
-                              <div className="chat-thinking-indicator" style={{ display: 'flex', alignItems: 'center', gap: 6, fontSize: '0.74rem', color: 'var(--text-secondary)', padding: '10px 0' }}>
-                                <Loader className="spinner" size={12} style={{ animation: 'spin 2s linear infinite' }} />
-                                <span>Orchestrating pipeline... ({stage === 'idle' ? 'Starting' : stage})</span>
-                              </div>
+                              <div 
+                                className="writer-output-markup"
+                                dangerouslySetInnerHTML={{ __html: renderMarkdown(text || 'Initializing model run...') }}
+                              />
                             );
-                          }
-                          
-                          return (
-                            <div 
-                              className="writer-output-markup"
-                              dangerouslySetInnerHTML={{ __html: renderMarkdown(text || 'Initializing model run...') }}
-                            />
-                          );
-                        })()}
+                          })()}
 
-                        {/* Slot-specific Footer */}
-                        {(() => {
-                          const stage = msg[`currentStage${activeModelSlot}`];
-                          const totalTime = msg[`totalTime${activeModelSlot}`];
-                          const confidence = msg[`confidence${activeModelSlot}`];
-                          
-                          if (!msg.running && stage === 'complete') {
-                            return (
-                              <div className="chat-bubble-footer">
-                                <span className="chat-trace-btn">
-                                  <Cpu size={11} />
-                                  <span>{selectedMessageId === msg.id ? 'Viewing Thinking Graph' : 'Click to inspect steps'}</span>
-                                </span>
-                                <span className="chat-trace-meta">
-                                  {totalTime ? `${(totalTime / 1000).toFixed(2)}s` : ''} 
-                                  {confidence !== undefined && confidence !== null ? ` • Score: ${confidence}%` : ''}
-                                </span>
-                              </div>
-                            );
-                          }
-                          return null;
-                        })()}
-                      </>
+                          {/* Slot-specific Footer */}
+                          {(() => {
+                            const stage = msg[`currentStage${activeModelSlot}`];
+                            const totalTime = msg[`totalTime${activeModelSlot}`];
+                            const confidence = msg[`confidence${activeModelSlot}`];
+                            
+                            if (!msg.running && stage === 'complete') {
+                              return (
+                                <div className="chat-bubble-footer">
+                                  <span className="chat-trace-btn">
+                                    <Cpu size={11} />
+                                    <span>{selectedMessageId === msg.id ? 'Viewing Thinking Graph' : 'Click to inspect steps'}</span>
+                                  </span>
+                                  <span className="chat-trace-meta">
+                                    {totalTime ? `${(totalTime / 1000).toFixed(2)}s` : ''} 
+                                    {confidence !== undefined && confidence !== null ? ` • Score: ${confidence}%` : ''}
+                                  </span>
+                                </div>
+                              );
+                            }
+                            return null;
+                          })()}
+                        </>
+                      )
                     )}
                   </div>
                 </div>

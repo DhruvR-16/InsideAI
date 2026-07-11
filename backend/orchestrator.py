@@ -28,6 +28,7 @@ LLM_PROVIDER = os.getenv("LLM_PROVIDER", "hybrid")  # groq | ollama | hybrid
 
 MAX_RETRIES = 3
 INITIAL_BACKOFF = 2.0  # seconds
+MAX_TOKENS = int(os.getenv("MAX_TOKENS", "400"))
 
 # Model mappings for up to 3 educational comparison slots
 SLOT_MODELS = {
@@ -103,6 +104,7 @@ async def call_groq_with_retry(
                 "model": model,
                 "messages": messages,
                 "temperature": 0.1,
+                "max_tokens": MAX_TOKENS,
             }
             if json_mode:
                 kwargs["response_format"] = {"type": "json_object"}
@@ -167,6 +169,7 @@ async def call_ollama(
         "model": model,
         "messages": messages,
         "temperature": 0.1,
+        "max_tokens": MAX_TOKENS,
     }
     if json_mode:
         payload["response_format"] = {"type": "json_object"}
