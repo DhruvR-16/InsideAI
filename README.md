@@ -91,11 +91,3 @@ cd frontend
 npm install
 npm run dev
 ```
-
-Open **http://localhost:5173** and ask something.
-
----
-
-## License
-
-Private portfolio project.
