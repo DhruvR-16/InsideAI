@@ -3,7 +3,8 @@ import json
 import time
 import asyncio
 import httpx
-from typing import List, Dict, Any, Callable, AsyncGenerator
+import contextvars
+from typing import List, Dict, Any, Callable, AsyncGenerator, Optional
 from groq import AsyncGroq, RateLimitError
 from dotenv import load_dotenv
 
@@ -28,22 +29,50 @@ LLM_PROVIDER = os.getenv("LLM_PROVIDER", "hybrid")  # groq | ollama | hybrid
 MAX_RETRIES = 3
 INITIAL_BACKOFF = 2.0  # seconds
 
-# In-memory session history store
-# Schema: { session_id: [MemoryExchange] }
-session_histories: Dict[str, List[MemoryExchange]] = {}
-import contextvars
+# Model mappings for up to 3 educational comparison slots
+SLOT_MODELS = {
+    0: "llama-3.1-8b-instant",  # Llama 3.1 8B
+    1: "gemma2-9b-it",          # Gemma 2 9B
+    2: "llama-3.2-3b-preview"   # Llama 3.2 3B
+}
 
-# Thread-safe and async-safe context variable to store custom user-provided API keys
-current_api_key = contextvars.ContextVar("current_api_key", default=None)
+SLOT_OLLAMA_MODELS = {
+    0: "llama3.2",
+    1: "gemma2:2b",
+    2: "qwen2.5:1.5b"
+}
+
+# Context variables isolated per async task loop
+current_model_slot = contextvars.ContextVar("current_model_slot", default=0)
+current_api_keys_pool = contextvars.ContextVar("current_api_keys_pool", default={0: [], 1: [], 2: []})
+
+last_system_prompt = contextvars.ContextVar("last_system_prompt", default=None)
+last_user_prompt = contextvars.ContextVar("last_user_prompt", default=None)
+last_raw_response = contextvars.ContextVar("last_raw_response", default=None)
+last_key_used = contextvars.ContextVar("last_key_used", default=None)
+last_provider = contextvars.ContextVar("last_provider", default=None)
+
+# In-memory session history store per session and model slot
+# Schema: { f"{session_id}_{slot_id}": [MemoryExchange] }
+session_histories: Dict[str, List[MemoryExchange]] = {}
 groq_client = None
+active_key_pointers = {0: 0, 1: 0, 2: 0}
 
 def get_groq_client() -> AsyncGroq:
     global groq_client
-    # If a custom API key is set in the context, create a dedicated client for it
-    custom_key = current_api_key.get()
-    if custom_key:
-        return AsyncGroq(api_key=custom_key)
+    slot = current_model_slot.get()
+    pool = current_api_keys_pool.get().get(slot, [])
+    
+    if pool:
+        pointer = active_key_pointers[slot] % len(pool)
+        active_key = pool[pointer]
+        # Mask the key for logs
+        masked = active_key[:6] + "..." + active_key[-4:] if len(active_key) > 10 else "..."
+        last_key_used.set(f"User Key #{pointer + 1} ({masked})")
+        return AsyncGroq(api_key=active_key)
         
+    # Fallback to system key
+    last_key_used.set("System Primary Key")
     if not groq_client:
         api_key = os.getenv("GROQ_API_KEY")
         if not api_key:
@@ -53,13 +82,20 @@ def get_groq_client() -> AsyncGroq:
 
 async def call_groq_with_retry(
     messages: List[Dict[str, str]],
-    model: str = DEFAULT_MODEL,
+    model: str,
     json_mode: bool = False,
     stream: bool = False
 ) -> Any:
-    """Wrapper around Groq API calls with rate-limit retries."""
+    """Wrapper around Groq API calls with rate-limit retries and automatic key rotation."""
     client = get_groq_client()
     backoff = INITIAL_BACKOFF
+
+    # Educational trace logging
+    system_msg = next((m["content"] for m in messages if m["role"] == "system"), "")
+    user_msg = next((m["content"] for m in messages if m["role"] == "user"), "")
+    last_system_prompt.set(system_msg)
+    last_user_prompt.set(user_msg)
+    last_provider.set("Groq")
 
     for attempt in range(MAX_RETRIES):
         try:
@@ -74,14 +110,30 @@ async def call_groq_with_retry(
             if stream:
                 raw_stream = await client.chat.completions.create(**kwargs, stream=True)
                 async def text_stream():
+                    tokens = []
                     async for chunk in raw_stream:
                         if chunk.choices and chunk.choices[0].delta.content:
-                            yield chunk.choices[0].delta.content
+                            tok = chunk.choices[0].delta.content
+                            tokens.append(tok)
+                            yield tok
+                    last_raw_response.set("".join(tokens))
                 return text_stream()
             
             response = await client.chat.completions.create(**kwargs)
-            return response.choices[0].message.content.strip()
+            content = response.choices[0].message.content.strip()
+            last_raw_response.set(content)
+            return content
         except RateLimitError as e:
+            slot = current_model_slot.get()
+            pool = current_api_keys_pool.get().get(slot, [])
+            
+            # Key rotation fallback
+            if pool and len(pool) > 1:
+                active_key_pointers[slot] = (active_key_pointers[slot] + 1) % len(pool)
+                print(f"Slot {slot} rate limited. Rotating to key index {active_key_pointers[slot]}...")
+                # Immediately retry with the next key, bypassing wait
+                return await call_groq_with_retry(messages, model, json_mode, stream)
+                
             if attempt == MAX_RETRIES - 1:
                 print(f"Rate limit exceeded on final attempt: {e}")
                 raise e
@@ -94,13 +146,17 @@ async def call_groq_with_retry(
 
 async def call_ollama(
     messages: List[Dict[str, str]],
-    model: str = OLLAMA_MODEL,
+    model: Optional[str] = None,
     json_mode: bool = False,
     stream: bool = False
 ) -> Any:
     """Calls local Ollama instance via its OpenAI-compatible API."""
     url = f"{OLLAMA_HOST}/v1/chat/completions"
+    slot = current_model_slot.get()
     
+    if not model:
+        model = SLOT_OLLAMA_MODELS.get(slot, OLLAMA_MODEL)
+        
     payload = {
         "model": model,
         "messages": messages,
@@ -109,12 +165,20 @@ async def call_ollama(
     if json_mode:
         payload["response_format"] = {"type": "json_object"}
         
+    # Trace setup
+    system_msg = next((m["content"] for m in messages if m["role"] == "system"), "")
+    user_msg = next((m["content"] for m in messages if m["role"] == "user"), "")
+    last_system_prompt.set(system_msg)
+    last_user_prompt.set(user_msg)
+    last_provider.set(f"Ollama ({model})")
+    last_key_used.set("Local Machine (Ollama)")
+        
     try:
-        # Use a generous timeout for local models that might run on slower GPUs/CPUs
         async with httpx.AsyncClient(timeout=90.0) as client:
             if stream:
                 payload["stream"] = True
                 async def text_stream():
+                    tokens = []
                     async with client.stream("POST", url, json=payload) as response:
                         async for line in response.aiter_lines():
                             if line.startswith("data: "):
@@ -125,27 +189,39 @@ async def call_ollama(
                                     chunk_data = json.loads(line_content)
                                     token = chunk_data["choices"][0]["delta"].get("content", "")
                                     if token:
+                                        tokens.append(token)
                                         yield token
                                 except Exception:
                                     pass
+                    last_raw_response.set("".join(tokens))
                 return text_stream()
             else:
                 response = await client.post(url, json=payload)
                 response.raise_for_status()
                 data = response.json()
-                return data["choices"][0]["message"]["content"].strip()
+                content = data["choices"][0]["message"]["content"].strip()
+                last_raw_response.set(content)
+                return content
     except Exception as e:
+        # If slot model fails (e.g. not pulled), fall back to default OLLAMA_MODEL
+        if model != OLLAMA_MODEL:
+            print(f"Local model {model} failed. Trying default {OLLAMA_MODEL}...")
+            return await call_ollama(messages, model=OLLAMA_MODEL, json_mode=json_mode, stream=stream)
         print(f"Ollama call failed: {e}")
         raise e
 
 async def call_llm(
     messages: List[Dict[str, str]],
-    model: str = DEFAULT_MODEL,
+    model: Optional[str] = None,
     json_mode: bool = False,
     stream: bool = False
 ) -> Any:
     """Unified interface to route calls between Groq and local Ollama based on provider configuration."""
     provider = os.getenv("LLM_PROVIDER", "hybrid").lower()
+    slot = current_model_slot.get()
+    
+    if not model:
+        model = SLOT_MODELS.get(slot, DEFAULT_MODEL)
     
     if provider == "ollama":
         return await call_ollama(messages, json_mode=json_mode, stream=stream)
@@ -171,7 +247,7 @@ async def analyze_intent(query: str) -> IntentAnalysis:
         "  \"complexity\": \"simple\" | \"moderate\" | \"complex\",\n"
         "  \"key_entities\": [\"entity1\", \"entity2\"]\n"
         "}\n"
-        "Ensure requires_retrieval is true if the query asks about technical, historical, scientific, or biological topics (e.g., Transformers, attention, CRISPR, DNA, DNS, public-key cryptography, quantum computing, RAG, RLHF, etc.).\n"
+        "Ensure requires_retrieval is true if the query asks about technical, historical, scientific, or biological topics.\n"
         "No conversational text, no markdown code blocks, output only the JSON object."
     )
     
@@ -186,10 +262,13 @@ async def analyze_intent(query: str) -> IntentAnalysis:
 
 # --- 2. Memory Stage ---
 async def retrieve_memory(query: str, session_id: str, requires_memory: bool) -> MemoryContext:
-    if not requires_memory or session_id not in session_histories or not session_histories[session_id]:
+    slot_id = current_model_slot.get()
+    storage_key = f"{session_id}_{slot_id}"
+    
+    if not requires_memory or storage_key not in session_histories or not session_histories[storage_key]:
         return MemoryContext(relevant_history=[], found_context=False)
     
-    history = session_histories[session_id]
+    history = session_histories[storage_key]
     
     system_prompt = (
         "You are a memory context retriever. Given the user's new query and the conversation history, "
@@ -359,34 +438,29 @@ async def generate_response_stream(
     async for token in stream_response:
         yield token
 
-# --- Full Pipeline Orchestrator ---
-async def run_pipeline(
-    query: str,
-    session_id: str,
-    event_callback: Callable[[Dict[str, Any]], Any],
-    custom_api_key: str = None
-) -> str:
-    """Wrapper that sets the custom API key context before running the pipeline."""
-    token = current_api_key.set(custom_api_key)
-    try:
-        return await _run_pipeline_internal(query, session_id, event_callback)
-    finally:
-        current_api_key.reset(token)
-
+# --- Internal Pipeline Implementation ---
 async def _run_pipeline_internal(
     query: str,
     session_id: str,
-    event_callback: Callable[[Dict[str, Any]], Any]
+    event_callback: Callable[[Dict[str, Any]], Any],
+    slot_id: int
 ) -> str:
-    """Internal implementation of the orchestrator DAG pipeline."""
+    """Internal implementation of the orchestrator DAG pipeline tagged by slot ID."""
     pipeline_start_time = time.time()
     
-    # Stage helper to wrap latency measuring and event emitting
+    # Stage helper to wrap latency measuring and educational trace event emitting
     async def run_stage(stage_name: str, coro_func: Callable[[], Any]) -> Any:
         start_time = time.time()
+        
+        # Reset trace properties for this execution context
+        last_system_prompt.set(None)
+        last_user_prompt.set(None)
+        last_raw_response.set(None)
+        
         await event_callback({
             "event": "stage_start",
             "stage": stage_name,
+            "model_slot_id": slot_id,
             "timestamp": start_time * 1000
         })
         
@@ -400,13 +474,23 @@ async def _run_pipeline_internal(
             output_dict = output.model_dump()
         elif isinstance(output, dict):
             output_dict = output
+        else:
+            output_dict = {"text": str(output)}
             
         await event_callback({
             "event": "stage_complete",
             "stage": stage_name,
+            "model_slot_id": slot_id,
             "duration_ms": round(duration_ms, 2),
             "output": output_dict,
-            "timestamp": end_time * 1000
+            "timestamp": end_time * 1000,
+            
+            # Educational tracing metadata
+            "system_prompt": last_system_prompt.get(),
+            "user_prompt": last_user_prompt.get(),
+            "raw_llm_response": last_raw_response.get(),
+            "active_key_masked": last_key_used.get(),
+            "provider_used": last_provider.get()
         })
         return output
 
@@ -436,9 +520,9 @@ async def _run_pipeline_internal(
         lambda: critique_plan(query, intent, kb, plan)
     )
     
-    # If the plan was rejected, we allow exactly one revision cycle
+    # Revision cycle
     if not critique.plan_approved:
-        print("Plan rejected by critic. Starting revision cycle...")
+        print(f"[Slot {slot_id}] Plan rejected by critic. Starting revision cycle...")
         
         plan = await run_stage(
             "planner_revision", 
@@ -458,6 +542,7 @@ async def _run_pipeline_internal(
     await event_callback({
         "event": "stage_start",
         "stage": "writer",
+        "model_slot_id": slot_id,
         "timestamp": writer_start_time * 1000
     })
     
@@ -467,6 +552,7 @@ async def _run_pipeline_internal(
         await event_callback({
             "event": "token",
             "stage": "writer",
+            "model_slot_id": slot_id,
             "text_chunk": chunk
         })
         await asyncio.sleep(0.01)
@@ -478,24 +564,32 @@ async def _run_pipeline_internal(
     await event_callback({
         "event": "stage_complete",
         "stage": "writer",
+        "model_slot_id": slot_id,
         "duration_ms": round(writer_duration_ms, 2),
         "output": {"text": final_response},
-        "timestamp": writer_end_time * 1000
+        "timestamp": writer_end_time * 1000,
+        "system_prompt": last_system_prompt.get(),
+        "user_prompt": last_user_prompt.get(),
+        "raw_llm_response": final_response,
+        "active_key_masked": last_key_used.get(),
+        "provider_used": last_provider.get()
     })
     
-    # Update Session Memory
-    if session_id not in session_histories:
-        session_histories[session_id] = []
-    session_histories[session_id].append(MemoryExchange(role="user", content=query))
-    session_histories[session_id].append(MemoryExchange(role="assistant", content=final_response))
+    # Update Session Memory per slot
+    storage_key = f"{session_id}_{slot_id}"
+    if storage_key not in session_histories:
+        session_histories[storage_key] = []
+    session_histories[storage_key].append(MemoryExchange(role="user", content=query))
+    session_histories[storage_key].append(MemoryExchange(role="assistant", content=final_response))
     
-    if len(session_histories[session_id]) > 20:
-        session_histories[session_id] = session_histories[session_id][-20:]
+    if len(session_histories[storage_key]) > 20:
+        session_histories[storage_key] = session_histories[storage_key][-20:]
         
     # Complete pipeline
     pipeline_duration_ms = (time.time() - pipeline_start_time) * 1000
     await event_callback({
         "event": "pipeline_complete",
+        "model_slot_id": slot_id,
         "total_duration_ms": round(pipeline_duration_ms, 2),
         "final_output": final_response,
         "confidence_score": critique.confidence_score,
@@ -503,3 +597,56 @@ async def _run_pipeline_internal(
     })
     
     return final_response
+
+
+# --- Full Pipeline Orchestrator ---
+async def run_pipeline(
+    query: str,
+    session_id: str,
+    event_callback: Callable[[Dict[str, Any]], Any],
+    custom_api_key: Optional[str] = None
+) -> str:
+    """Runs up to 3 model slots concurrently, distributing provided API keys."""
+    # Split the override key input if comma-separated
+    keys = [k.strip() for k in custom_api_key.split(",") if k.strip()] if custom_api_key else []
+    
+    # Distribute keys to slot pools:
+    # If 1 key provided, distribute to all slots.
+    # If multiple, round-robin them.
+    slot_keys = {0: [], 1: [], 2: []}
+    if len(keys) == 1:
+        slot_keys[0] = [keys[0]]
+        slot_keys[1] = [keys[0]]
+        slot_keys[2] = [keys[0]]
+    elif len(keys) >= 2:
+        for i, k in enumerate(keys):
+            slot_keys[i % 3].append(k)
+
+    current_api_keys_pool.set(slot_keys)
+
+    # Throttled execution task runner to space out parallel API start bounds
+    async def run_slot_pipeline(slot_id: int):
+        # ContextVars isolate automatically in async Tasks
+        current_model_slot.set(slot_id)
+        # Apply a minor stagger to avoid triggering simultaneous RPM limit flags
+        if slot_id > 0:
+            await asyncio.sleep(slot_id * 0.150)
+            
+        try:
+            return await _run_pipeline_internal(query, session_id, event_callback, slot_id)
+        except Exception as e:
+            print(f"Model Slot {slot_id} failed: {e}")
+            await event_callback({
+                "event": "error",
+                "model_slot_id": slot_id,
+                "message": f"Execution failed: {str(e)}"
+            })
+            return ""
+
+    # Execute all slots concurrently
+    results = await asyncio.gather(
+        run_slot_pipeline(0),
+        run_slot_pipeline(1),
+        run_slot_pipeline(2)
+    )
+    return results[0]

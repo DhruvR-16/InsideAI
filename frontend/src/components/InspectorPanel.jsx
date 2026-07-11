@@ -3,18 +3,86 @@ import { X, Copy, Check, Terminal, FileText, AlertTriangle } from 'lucide-react'
 
 export default function InspectorPanel({ node, onClose }) {
   const [copied, setCopied] = React.useState(false);
+  const [activeTab, setActiveTab] = React.useState('parsed'); // 'parsed' | 'prompts' | 'raw'
+
+  React.useEffect(() => {
+    // Reset back to parsed tab when selecting a different node
+    setActiveTab('parsed');
+  }, [node.id]);
 
   if (!node) return null;
 
+  const getRawContent = () => {
+    if (node.data.rawLlmResponse) return node.data.rawLlmResponse;
+    if (node.data.output) return JSON.stringify(node.data.output, null, 2);
+    return 'No raw response content available.';
+  };
+
   const handleCopy = () => {
-    navigator.clipboard.writeText(JSON.stringify(node.data.output, null, 2));
+    navigator.clipboard.writeText(getRawContent());
     setCopied(true);
     setTimeout(() => setCopied(false), 2000);
   };
 
   const renderContent = () => {
-    const { label, output, input } = node.data;
+    const { label, output, input, systemPrompt, userPrompt, providerUsed, activeKeyMasked } = node.data;
 
+    if (activeTab === 'prompts') {
+      return (
+        <div style={{ display: 'flex', flexDirection: 'column', gap: 14 }}>
+          <div className="inspect-section">
+            <span className="inspect-section-title">Execution Context</span>
+            <div className="inspect-badge-row">
+              <span className="inspect-badge-key">LLM Provider</span>
+              <span className="inspect-badge-val active" style={{ background: 'var(--accent-light)', color: 'var(--accent-color)' }}>
+                {providerUsed || 'Groq'}
+              </span>
+            </div>
+            <div className="inspect-badge-row">
+              <span className="inspect-badge-key">Active Key</span>
+              <span className="inspect-badge-val active" style={{ background: '#f1f1f3', color: 'var(--text-secondary)' }}>
+                {activeKeyMasked || 'System Primary Key'}
+              </span>
+            </div>
+          </div>
+
+          <div className="inspect-section">
+            <span className="inspect-section-title">System Prompt</span>
+            <pre className="prompt-pre">
+              {systemPrompt || 'No system prompt configured for this node.'}
+            </pre>
+          </div>
+
+          <div className="inspect-section">
+            <span className="inspect-section-title">User Prompt Context</span>
+            <pre className="prompt-pre">
+              {userPrompt || 'No user prompt context recorded.'}
+            </pre>
+          </div>
+        </div>
+      );
+    }
+
+    if (activeTab === 'raw') {
+      return (
+        <div style={{ display: 'flex', flexDirection: 'column', gap: 10, height: '100%' }}>
+          <div className="inspect-section" style={{ flex: 1, display: 'flex', flexDirection: 'column' }}>
+            <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 6 }}>
+              <span className="inspect-section-title">Unparsed LLM String</span>
+              <button onClick={handleCopy} className="inspector-copy-btn" style={{ background: 'none', border: 'none', color: 'var(--accent-color)', fontSize: '0.65rem', cursor: 'pointer', display: 'flex', alignItems: 'center', gap: 4 }}>
+                {copied ? <Check style={{ width: 12, height: 12, color: 'var(--success-color)' }} /> : <Copy style={{ width: 12, height: 12 }} />}
+                {copied ? 'Copied' : 'Copy Response'}
+              </button>
+            </div>
+            <pre className="prompt-pre" style={{ flex: 1, maxHeight: 'none', overflowY: 'auto', margin: 0, fontStyle: 'normal' }}>
+              {getRawContent()}
+            </pre>
+          </div>
+        </div>
+      );
+    }
+
+    // Default: 'parsed' Tab Switch Case
     if (!output) {
       return (
         <div style={{ display: 'flex', flexDirection: 'column', alignItems: 'center', justifyContent: 'center', height: '180px', color: '#86868b' }}>
@@ -99,14 +167,12 @@ export default function InspectorPanel({ node, onClose }) {
                       <div className="history-card-role">
                         {h.role === 'user' ? 'User' : 'Assistant'}
                       </div>
-                      <p style={{ margin: 0 }}>{h.content}</p>
+                      <div className="history-card-text">{h.content}</div>
                     </div>
                   ))}
                 </div>
               ) : (
-                <p className="inspect-text-box italic" style={{ textAlign: 'center', color: '#86868b' }}>
-                  No past conversations referenced for this query.
-                </p>
+                <div style={{ fontSize: '0.7rem', color: '#86868b', fontStyle: 'italic' }}>No historical references selected</div>
               )}
             </div>
           </>
@@ -116,60 +182,62 @@ export default function InspectorPanel({ node, onClose }) {
         return (
           <>
             <div className="inspect-badge-row">
-              <span className="inspect-badge-key">RAG Vector DB Query</span>
+              <span className="inspect-badge-key">Retrieval Active</span>
               <span className={`inspect-badge-val ${output.retrieval_used ? 'active' : 'inactive'}`}>
-                {output.retrieval_used ? 'EXECUTED' : 'SKIPPED'}
+                {output.retrieval_used ? 'YES' : 'NO'}
               </span>
             </div>
 
             <div className="inspect-section">
-              <span className="inspect-section-title">
-                Retrieved Context Snippets ({output.retrieved_chunks?.length || 0})
-              </span>
+              <span className="inspect-section-title">Retrieved Reference Semantics</span>
               {output.retrieved_chunks && output.retrieved_chunks.length > 0 ? (
-                <div className="history-card-container">
-                  {output.retrieved_chunks.map((chk, i) => (
+                <div style={{ display: 'flex', flexDirection: 'column', gap: 10 }}>
+                  {output.retrieved_chunks.map((chunk, i) => (
                     <div key={i} className="chunk-card">
                       <div className="chunk-header">
-                        <span className="chunk-source">{chk.source}</span>
-                        <span className="chunk-score">Score: {chk.score}</span>
+                        <span className="chunk-source">{chunk.source}</span>
+                        <span className="chunk-score">Cosine: {chunk.score.toFixed(4)}</span>
                       </div>
-                      <p className="chunk-text">{chk.text}</p>
+                      <p className="chunk-text">{chunk.text}</p>
                     </div>
                   ))}
                 </div>
               ) : (
-                <p className="inspect-text-box italic" style={{ textAlign: 'center', color: '#86868b' }}>
-                  No knowledge snippets fetched.
-                </p>
+                <div style={{ fontSize: '0.7rem', color: '#86868b', fontStyle: 'italic' }}>No reference texts pulled</div>
               )}
             </div>
           </>
         );
 
       case 'planner':
-      case 'planner_revision':
         return (
           <>
             <div className="inspect-section">
-              <span className="inspect-section-title">Approach Strategy</span>
-              <p className="inspect-text-box" style={{ color: '#0066cc', fontWeight: 500 }}>
+              <span className="inspect-section-title">Execution Approach</span>
+              <p className="inspect-text-box">
                 {output.approach}
               </p>
             </div>
 
+            <div className="inspect-badge-row">
+              <span className="inspect-badge-key">Estimated Length</span>
+              <span className="inspect-badge-val active capitalize">
+                {output.estimated_length}
+              </span>
+            </div>
+
             <div className="inspect-section">
-              <span className="inspect-section-title">Structured Outlines</span>
-              <div style={{ display: 'flex', flexDirection: 'column', gap: 10 }}>
-                {output.sections && output.sections.map((sect, idx) => (
-                  <div key={idx} className="planner-section-card">
+              <span className="inspect-section-title">Proposed Layout Skeleton</span>
+              <div style={{ display: 'flex', flexDirection: 'column', gap: 8 }}>
+                {output.sections && output.sections.map((sec, i) => (
+                  <div key={i} className="planner-section-card">
                     <span className="planner-section-title">
-                      <FileText className="w-3.5 h-3.5" style={{ width: 14, height: 14 }} />
-                      {sect.heading}
+                      <FileText size={12} style={{ color: 'var(--accent-color)' }} />
+                      {sec.heading}
                     </span>
                     <ul className="planner-section-bullets">
-                      {sect.key_points && sect.key_points.map((pt, pIdx) => (
-                        <li key={pIdx}>{pt}</li>
+                      {sec.key_points && sec.key_points.map((pt, j) => (
+                        <li key={j}>{pt}</li>
                       ))}
                     </ul>
                   </div>
@@ -180,48 +248,43 @@ export default function InspectorPanel({ node, onClose }) {
         );
 
       case 'logic_critic':
-      case 'logic_critic_revision':
-        const isApproved = output.plan_approved;
         return (
           <>
             <div className="inspect-badge-row">
-              <span className="inspect-badge-key">Plan Approval Status</span>
-              <span className={`inspect-badge-val`} style={{ 
-                backgroundColor: isApproved ? '#e8f7ee' : '#fdf2f2', 
-                color: isApproved ? '#1d9d53' : '#d9383a' 
-              }}>
-                {isApproved ? 'APPROVED' : 'REJECTED BY CRITIC'}
+              <span className="inspect-badge-key">Plan Audit Status</span>
+              <span className={`inspect-badge-val ${output.plan_approved ? 'active' : 'inactive'}`} style={{ backgroundColor: output.plan_approved ? '#e8f7ee' : '#fff8eb', color: output.plan_approved ? '#1d9d53' : '#e28704' }}>
+                {output.plan_approved ? 'APPROVED' : 'REVISION REQUIRED'}
               </span>
             </div>
 
             <div className="inspect-badge-row">
-              <span className="inspect-badge-key">Critic confidence rating</span>
-              <span className="inspect-badge-val active">
+              <span className="inspect-badge-key">Confidence Grade</span>
+              <span className="inspect-badge-val active font-mono" style={{ backgroundColor: output.confidence_score >= 85 ? '#e8f7ee' : '#fdf2f2', color: output.confidence_score >= 85 ? '#1d9d53' : '#d9383a' }}>
                 {output.confidence_score}/100
               </span>
             </div>
 
             <div className="inspect-section">
-              <span className="inspect-section-title">Confidence Rationale</span>
+              <span className="inspect-section-title">Critic Audit Rationale</span>
               <p className="inspect-text-box">
                 {output.confidence_rationale}
               </p>
             </div>
 
             <div className="inspect-section">
-              <span className="inspect-section-title">Issues Found</span>
+              <span className="inspect-section-title">Criticism Issues Log</span>
               {output.issues_found && output.issues_found.length > 0 ? (
-                <div style={{ display: 'flex', flexDirection: 'column', gap: 8 }}>
+                <div style={{ display: 'flex', flexDirection: 'column', gap: 6 }}>
                   {output.issues_found.map((issue, i) => (
                     <div key={i} className="critic-issue-row">
-                      <AlertTriangle className="critic-issue-icon" style={{ width: 14, height: 14, shrink: 0 }} />
-                      <p style={{ margin: 0 }}>{issue}</p>
+                      <AlertTriangle size={13} className="critic-issue-icon" />
+                      <span>{issue}</span>
                     </div>
                   ))}
                 </div>
               ) : (
                 <div className="critic-perfect-card">
-                  All validation rubrics passed. Plan is factually consistent and complete.
+                  Plan matches reasoning requirements. Perfect audit alignment.
                 </div>
               )}
             </div>
@@ -231,10 +294,10 @@ export default function InspectorPanel({ node, onClose }) {
       case 'writer':
         return (
           <div className="inspect-section">
-            <span className="inspect-section-title">Raw Response Text</span>
-            <div className="inspect-text-box" style={{ fontFamily: 'monospace', whiteSpace: 'pre-wrap', maxHeight: 300, overflowY: 'auto' }}>
-              {output.text}
-            </div>
+            <span className="inspect-section-title">Drafting Stage</span>
+            <p className="inspect-text-box font-mono" style={{ fontSize: '0.72rem', whiteSpace: 'pre-wrap' }}>
+              Final streamed text outputs compiled under the selected model. Check the left chatbot pane to read full output markdown blocks.
+            </p>
           </div>
         );
 
@@ -255,23 +318,36 @@ export default function InspectorPanel({ node, onClose }) {
         </button>
       </div>
 
-      <div className="inspector-body">
-        {renderContent()}
+      {/* Tabs list */}
+      <div className="inspector-tabs" style={{ display: 'flex', gap: 4, padding: '0 1.25rem', borderBottom: '1px solid var(--border-light)', marginBottom: 12 }}>
+        {[
+          { id: 'parsed', name: 'Parsed Output' },
+          { id: 'prompts', name: 'Prompts Trace' },
+          { id: 'raw', name: 'Raw JSON API' }
+        ].map(tab => (
+          <button
+            key={tab.id}
+            className={`inspector-tab-btn ${activeTab === tab.id ? 'active' : ''}`}
+            onClick={() => setActiveTab(tab.id)}
+            style={{
+              background: 'none',
+              border: 'none',
+              borderBottom: activeTab === tab.id ? '2px solid var(--accent-color)' : '2px solid transparent',
+              color: activeTab === tab.id ? 'var(--accent-color)' : 'var(--text-secondary)',
+              fontSize: '0.7rem',
+              fontWeight: 500,
+              padding: '6px 10px',
+              cursor: 'pointer',
+              transition: 'all 0.15s'
+            }}
+          >
+            {tab.name}
+          </button>
+        ))}
+      </div>
 
-        {node.data.output && (
-          <div style={{ display: 'flex', flexDirection: 'column', gap: 6, marginTop: 'auto', borderTop: '1px solid var(--border-light)', paddingTop: 12 }}>
-            <div className="inspector-raw-header">
-              <span className="inspector-raw-title">Raw JSON Payload</span>
-              <button onClick={handleCopy} className="inspector-copy-btn">
-                {copied ? <Check style={{ width: 12, height: 12, color: 'var(--success-color)' }} /> : <Copy style={{ width: 12, height: 12 }} />}
-                {copied ? 'Copied' : 'Copy Payload'}
-              </button>
-            </div>
-            <pre className="inspector-raw-pre">
-              {JSON.stringify(node.data.output, null, 2)}
-            </pre>
-          </div>
-        )}
+      <div className="inspector-body" style={{ flex: 1, overflowY: 'auto', padding: '0 1.25rem 1.25rem 1.25rem', display: 'flex', flexDirection: 'column' }}>
+        {renderContent()}
       </div>
     </div>
   );

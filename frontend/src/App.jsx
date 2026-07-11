@@ -1,4 +1,4 @@
-import React, { useState, useEffect, useRef } from 'react';
+import React, { useState, useEffect, useRef, useMemo } from 'react';
 import { 
   Send, 
   Terminal, 
@@ -9,7 +9,8 @@ import {
   ChevronRight,
   Cpu,
   Clock,
-  ShieldCheck
+  ShieldCheck,
+  Loader
 } from 'lucide-react';
 import FlowGraph from './components/FlowGraph';
 import InspectorPanel from './components/InspectorPanel';
@@ -56,12 +57,11 @@ export default function App() {
   const [running, setRunning] = useState(false);
   const [chatMessages, setChatMessages] = useState([]);
   
-  // Custom API key override
+  // Custom API key override (supports multiple comma-separated keys)
   const [userApiKey, setUserApiKey] = useState(() => localStorage.getItem('user_groq_api_key') || '');
 
-  // Graph state: mirrors either the live run or the selected message trace
-  const [activeGraphEvents, setActiveGraphEvents] = useState([]);
-  const [activeGraphCurrentStage, setActiveGraphCurrentStage] = useState('idle');
+  // Dynamic slots: 0 = Llama 3.1 8B, 1 = Gemma 2 9B, 2 = Llama 3.2 3B
+  const [activeModelSlot, setActiveModelSlot] = useState(0);
   const [selectedMessageId, setSelectedMessageId] = useState(null);
   
   // Floating panels state
@@ -73,6 +73,28 @@ export default function App() {
   
   const wsRef = useRef(null);
   const messagesEndRef = useRef(null);
+
+  // Find currently inspected assistant message
+  const activeMessage = useMemo(() => {
+    return chatMessages.find(m => m.id === selectedMessageId) || null;
+  }, [chatMessages, selectedMessageId]);
+
+  // Derived graph states based on activeMessage and activeModelSlot
+  const activeGraphEvents = useMemo(() => {
+    if (!activeMessage) return [];
+    if (activeModelSlot === 0) return activeMessage.events0 || [];
+    if (activeModelSlot === 1) return activeMessage.events1 || [];
+    if (activeModelSlot === 2) return activeMessage.events2 || [];
+    return [];
+  }, [activeMessage, activeModelSlot]);
+
+  const activeGraphCurrentStage = useMemo(() => {
+    if (!activeMessage) return 'idle';
+    if (activeModelSlot === 0) return activeMessage.currentStage0 || 'idle';
+    if (activeModelSlot === 1) return activeMessage.currentStage1 || 'idle';
+    if (activeModelSlot === 2) return activeMessage.currentStage2 || 'idle';
+    return 'idle';
+  }, [activeMessage, activeModelSlot]);
 
   // Connect to WebSocket
   useEffect(() => {
@@ -88,6 +110,42 @@ export default function App() {
       messagesEndRef.current.scrollIntoView({ behavior: 'smooth' });
     }
   }, [chatMessages, running]);
+
+  // Keep inspector panel content updated in real-time if a live run finishes new stages
+  useEffect(() => {
+    if (!selectedNode || activeGraphEvents.length === 0) return;
+
+    const nodeStageId = selectedNode.id;
+    let matchingEvent = null;
+
+    if (nodeStageId === 'planner') {
+      matchingEvent = activeGraphEvents.find(e => e.stage === 'planner_revision') || 
+                      activeGraphEvents.find(e => e.stage === 'planner');
+    } else if (nodeStageId === 'logic_critic') {
+      matchingEvent = activeGraphEvents.find(e => e.stage === 'logic_critic_revision') || 
+                      activeGraphEvents.find(e => e.stage === 'logic_critic');
+    } else {
+      matchingEvent = activeGraphEvents.find(e => e.stage === nodeStageId);
+    }
+
+    let queryText = activeMessage ? activeMessage.queryRef || "" : "";
+
+    if (matchingEvent) {
+      setSelectedNode({
+        id: nodeStageId,
+        data: {
+          label: selectedNode.data.label,
+          output: matchingEvent.output,
+          input: queryText,
+          systemPrompt: matchingEvent.system_prompt,
+          userPrompt: matchingEvent.user_prompt,
+          rawLlmResponse: matchingEvent.raw_llm_response,
+          activeKeyMasked: matchingEvent.active_key_masked,
+          providerUsed: matchingEvent.provider_used
+        }
+      });
+    }
+  }, [activeGraphEvents, activeMessage, selectedMessageId]);
 
   const connectWS = () => {
     if (wsRef.current) {
@@ -122,69 +180,78 @@ export default function App() {
   };
 
   const handleWSMessage = (data) => {
+    const slot = data.model_slot_id ?? 0;
+
     if (data.event === 'stage_start') {
-      setActiveGraphCurrentStage(data.stage);
-      
-      // Update active message running status
       setChatMessages(prev => prev.map((msg, idx) => {
         if (idx === prev.length - 1 && msg.role === 'assistant') {
-          return { ...msg, currentStage: data.stage };
+          const updated = { ...msg };
+          updated[`currentStage${slot}`] = data.stage;
+          return updated;
         }
         return msg;
       }));
     } else if (data.event === 'stage_complete') {
-      setActiveGraphEvents(prev => [...prev, data]);
-      
       setChatMessages(prev => prev.map((msg, idx) => {
         if (idx === prev.length - 1 && msg.role === 'assistant') {
-          const updatedEvents = [...(msg.events || []), data];
-          let updatedMeta = {};
+          const updated = { ...msg };
+          updated[`events${slot}`] = [...(updated[`events${slot}`] || []), data];
           if (data.stage === 'logic_critic' || data.stage === 'logic_critic_revision') {
-            updatedMeta.confidence = data.output.confidence_score;
+            updated[`confidence${slot}`] = data.output.confidence_score;
           }
-          return { ...msg, events: updatedEvents, ...updatedMeta };
+          return updated;
         }
         return msg;
       }));
     } else if (data.event === 'token') {
       setChatMessages(prev => prev.map((msg, idx) => {
         if (idx === prev.length - 1 && msg.role === 'assistant') {
-          return { ...msg, content: msg.content + data.text_chunk };
+          const updated = { ...msg };
+          updated[`text${slot}`] = (updated[`text${slot}`] || '') + data.text_chunk;
+          return updated;
         }
         return msg;
       }));
     } else if (data.event === 'pipeline_complete') {
-      setActiveGraphCurrentStage('complete');
-      setActiveGraphEvents(prev => [...prev, data]);
-      setRunning(false);
-
       setChatMessages(prev => prev.map((msg, idx) => {
         if (idx === prev.length - 1 && msg.role === 'assistant') {
-          return { 
-            ...msg, 
-            content: data.final_output,
-            totalTime: data.total_duration_ms,
-            confidence: data.confidence_score,
-            events: [...(msg.events || []), data],
-            currentStage: 'complete',
-            running: false
-          };
+          const updated = { ...msg };
+          updated[`text${slot}`] = data.final_output;
+          updated[`totalTime${slot}`] = data.total_duration_ms;
+          updated[`confidence${slot}`] = data.confidence_score;
+          updated[`currentStage${slot}`] = 'complete';
+          updated[`events${slot}`] = [...(updated[`events${slot}`] || []), data];
+
+          // Check if all 3 comparison slots have finished
+          const s0Done = updated.currentStage0 === 'complete' || updated.currentStage0 === 'error';
+          const s1Done = updated.currentStage1 === 'complete' || updated.currentStage1 === 'error';
+          const s2Done = updated.currentStage2 === 'complete' || updated.currentStage2 === 'error';
+          
+          if (s0Done && s1Done && s2Done) {
+            updated.running = false;
+            setTimeout(() => setRunning(false), 0);
+          }
+          return updated;
         }
         return msg;
       }));
     } else if (data.event === 'error') {
-      setRunning(false);
-      setActiveGraphCurrentStage('error');
-      alert(`Pipeline error: ${data.message}`);
-      
       setChatMessages(prev => prev.map((msg, idx) => {
         if (idx === prev.length - 1 && msg.role === 'assistant') {
-          return { 
-            ...msg, 
-            content: `Error: ${data.message}`,
-            currentStage: 'error',
-            running: false
-          };
+          const updated = { ...msg };
+          updated[`text${slot}`] = `Error: ${data.message}`;
+          updated[`currentStage${slot}`] = 'error';
+
+          // Check if all 3 comparison slots have finished
+          const s0Done = updated.currentStage0 === 'complete' || updated.currentStage0 === 'error';
+          const s1Done = updated.currentStage1 === 'complete' || updated.currentStage1 === 'error';
+          const s2Done = updated.currentStage2 === 'complete' || updated.currentStage2 === 'error';
+          
+          if (s0Done && s1Done && s2Done) {
+            updated.running = false;
+            setTimeout(() => setRunning(false), 0);
+          }
+          return updated;
         }
         return msg;
       }));
@@ -202,8 +269,6 @@ export default function App() {
     }
 
     // Reset layout for new run
-    setActiveGraphEvents([]);
-    setActiveGraphCurrentStage('client_query');
     setSelectedNode(null);
     setSelectedMessageId(null);
     setRunning(true);
@@ -217,13 +282,26 @@ export default function App() {
       { 
         id: assistantMsgId, 
         role: 'assistant', 
-        content: '', 
-        events: [], 
-        totalTime: 0, 
-        confidence: null,
-        currentStage: 'intent_analyzer',
+        queryRef: prompt,
         running: true,
-        queryRef: prompt
+        // Slot 0 (Llama 3.1 8B)
+        text0: '',
+        events0: [],
+        currentStage0: 'idle',
+        totalTime0: null,
+        confidence0: null,
+        // Slot 1 (Gemma 2 9B)
+        text1: '',
+        events1: [],
+        currentStage1: 'idle',
+        totalTime1: null,
+        confidence1: null,
+        // Slot 2 (Llama 3.2 3B)
+        text2: '',
+        events2: [],
+        currentStage2: 'idle',
+        totalTime2: null,
+        confidence2: null
       }
     ]);
 
@@ -234,10 +312,7 @@ export default function App() {
   // Inspect the steps for a past message
   const handleSelectMessageTrace = (msg) => {
     if (running || msg.role !== 'assistant') return;
-    
     setSelectedMessageId(msg.id);
-    setActiveGraphEvents(msg.events || []);
-    setActiveGraphCurrentStage(msg.currentStage || 'complete');
     setSelectedNode(null);
   };
 
@@ -255,14 +330,7 @@ export default function App() {
       matchingEvent = activeGraphEvents.find(e => e.stage === nodeStageId);
     }
 
-    // Find the original query text associated with the currently viewed trace
-    let queryText = "";
-    if (selectedMessageId) {
-      const selectedMsg = chatMessages.find(m => m.id === selectedMessageId);
-      if (selectedMsg) {
-        queryText = selectedMsg.queryRef || "";
-      }
-    }
+    let queryText = activeMessage ? activeMessage.queryRef || "" : "";
 
     if (matchingEvent) {
       setSelectedNode({
@@ -270,7 +338,12 @@ export default function App() {
         data: {
           label: reactflowNode.data.label,
           output: matchingEvent.output,
-          input: queryText
+          input: queryText,
+          systemPrompt: matchingEvent.system_prompt,
+          userPrompt: matchingEvent.user_prompt,
+          rawLlmResponse: matchingEvent.raw_llm_response,
+          activeKeyMasked: matchingEvent.active_key_masked,
+          providerUsed: matchingEvent.provider_used
         }
       });
     } else if (nodeStageId === 'user_query') {
@@ -294,15 +367,16 @@ export default function App() {
     }
   };
 
-  // Find currently active assistant metrics
-  const activeMetrics = (() => {
-    if (selectedMessageId) {
-      return chatMessages.find(m => m.id === selectedMessageId);
-    }
-    // fallback to last
-    const assists = chatMessages.filter(m => m.role === 'assistant');
-    return assists[assists.length - 1];
-  })();
+  // Derived active metrics per active model slot
+  const activeMetrics = useMemo(() => {
+    if (!activeMessage) return null;
+    return {
+      events: activeMessage[`events${activeModelSlot}`] || [],
+      totalTime: activeMessage[`totalTime${activeModelSlot}`],
+      confidence: activeMessage[`confidence${activeModelSlot}`],
+      currentStage: activeMessage[`currentStage${activeModelSlot}`]
+    };
+  }, [activeMessage, activeModelSlot]);
 
   return (
     <div className="app-container">
@@ -320,7 +394,7 @@ export default function App() {
               setUserApiKey(e.target.value);
               localStorage.setItem('user_groq_api_key', e.target.value);
             }}
-            placeholder="Override Groq API Key (Optional)"
+            placeholder="Override keys: key1,key2,key3 (optional)"
             style={{
               fontSize: '0.72rem',
               padding: '6px 12px',
@@ -399,22 +473,90 @@ export default function App() {
                       <p style={{ margin: 0 }}>{msg.content}</p>
                     ) : (
                       <>
-                        <div 
-                          className="writer-output-markup"
-                          dangerouslySetInnerHTML={{ __html: renderMarkdown(msg.content || 'Generating plan outline...') }}
-                        />
-                        {!msg.running && msg.currentStage === 'complete' && (
-                          <div className="chat-bubble-footer">
-                            <span className="chat-trace-btn">
-                              <Cpu size={11} />
-                              <span>{selectedMessageId === msg.id ? 'Viewing Thinking Graph' : 'Click to inspect steps'}</span>
-                            </span>
-                            <span className="chat-trace-meta">
-                              {msg.totalTime ? `${(msg.totalTime / 1000).toFixed(2)}s` : ''} 
-                              {msg.confidence ? ` • Score: ${msg.confidence}%` : ''}
-                            </span>
-                          </div>
-                        )}
+                        {/* Model Comparison Tabs inside Chat Bubble */}
+                        <div className="model-tabs-bar" onClick={(e) => e.stopPropagation()}>
+                          {[
+                            { name: "Llama 3.1 8B", slotId: 0 },
+                            { name: "Gemma 2 9B", slotId: 1 },
+                            { name: "Llama 3.2 3B", slotId: 2 }
+                          ].map((tab) => {
+                            const isCurrent = activeModelSlot === tab.slotId;
+                            const slotStage = msg[`currentStage${tab.slotId}`];
+                            const slotRunning = msg.running && slotStage !== 'complete' && slotStage !== 'error';
+                            
+                            let dotBgColor = '#cbcbcd';
+                            let isPulsing = false;
+                            
+                            if (slotRunning) {
+                              dotBgColor = 'var(--accent-color)';
+                              isPulsing = true;
+                            } else if (slotStage === 'complete') {
+                              dotBgColor = 'var(--success-color)';
+                            } else if (slotStage === 'error') {
+                              dotBgColor = 'var(--error-color)';
+                            }
+                            
+                            return (
+                              <button
+                                key={tab.slotId}
+                                className={`model-tab-btn ${isCurrent ? 'active' : ''}`}
+                                onClick={() => {
+                                  setActiveModelSlot(tab.slotId);
+                                  setSelectedMessageId(msg.id);
+                                }}
+                              >
+                                <span className={`status-dot ${isPulsing ? 'pulsing' : ''}`} style={{ backgroundColor: dotBgColor }} />
+                                <span>{tab.name}</span>
+                              </button>
+                            );
+                          })}
+                        </div>
+
+                        {/* Slot-specific Content */}
+                        {(() => {
+                          const text = msg[`text${activeModelSlot}`] || '';
+                          const stage = msg[`currentStage${activeModelSlot}`] || 'idle';
+                          const isRunningSlot = msg.running && stage !== 'complete' && stage !== 'error';
+                          
+                          if (isRunningSlot && !text) {
+                            return (
+                              <div className="chat-thinking-indicator" style={{ display: 'flex', alignItems: 'center', gap: 6, fontSize: '0.74rem', color: 'var(--text-secondary)', padding: '10px 0' }}>
+                                <Loader className="spinner" size={12} style={{ animation: 'spin 2s linear infinite' }} />
+                                <span>Orchestrating pipeline... ({stage === 'idle' ? 'Starting' : stage})</span>
+                              </div>
+                            );
+                          }
+                          
+                          return (
+                            <div 
+                              className="writer-output-markup"
+                              dangerouslySetInnerHTML={{ __html: renderMarkdown(text || 'Initializing model run...') }}
+                            />
+                          );
+                        })()}
+
+                        {/* Slot-specific Footer */}
+                        {(() => {
+                          const stage = msg[`currentStage${activeModelSlot}`];
+                          const totalTime = msg[`totalTime${activeModelSlot}`];
+                          const confidence = msg[`confidence${activeModelSlot}`];
+                          
+                          if (!msg.running && stage === 'complete') {
+                            return (
+                              <div className="chat-bubble-footer">
+                                <span className="chat-trace-btn">
+                                  <Cpu size={11} />
+                                  <span>{selectedMessageId === msg.id ? 'Viewing Thinking Graph' : 'Click to inspect steps'}</span>
+                                </span>
+                                <span className="chat-trace-meta">
+                                  {totalTime ? `${(totalTime / 1000).toFixed(2)}s` : ''} 
+                                  {confidence !== undefined && confidence !== null ? ` • Score: ${confidence}%` : ''}
+                                </span>
+                              </div>
+                            );
+                          }
+                          return null;
+                        })()}
                       </>
                     )}
                   </div>
@@ -488,6 +630,8 @@ export default function App() {
             currentStage={activeGraphCurrentStage} 
             onNodeSelect={handleNodeSelect}
             selectedNodeId={selectedNode?.id}
+            activeModelSlot={activeModelSlot}
+            setActiveModelSlot={setActiveModelSlot}
           />
 
           {/* Inspector Panel */}

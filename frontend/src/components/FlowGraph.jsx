@@ -91,7 +91,14 @@ const CustomNode = ({ data, id }) => {
   );
 };
 
-export default function FlowGraph({ events, currentStage, onNodeSelect, selectedNodeId }) {
+export default function FlowGraph({ 
+  events, 
+  currentStage, 
+  onNodeSelect, 
+  selectedNodeId,
+  activeModelSlot,
+  setActiveModelSlot
+}) {
   const nodeTypes = useMemo(() => ({ custom: CustomNode }), []);
 
   const nodes = useMemo(() => {
@@ -332,8 +339,27 @@ export default function FlowGraph({ events, currentStage, onNodeSelect, selected
     });
   }, [events, currentStage, selectedNodeId]);
 
+  const modelSlots = [
+    { id: 0, name: "Llama 3.1 8B" },
+    { id: 1, name: "Gemma 2 9B" },
+    { id: 2, name: "Llama 3.2 3B" }
+  ];
+
   return (
-    <div style={{ width: '100%', height: '100%' }}>
+    <div style={{ width: '100%', height: '100%', position: 'relative' }}>
+      {/* Graph Slot Navigation Tabs */}
+      <div className="graph-tabs-container">
+        {modelSlots.map(slot => (
+          <button
+            key={slot.id}
+            className={`graph-tab-btn ${activeModelSlot === slot.id ? 'active' : ''}`}
+            onClick={() => setActiveModelSlot(slot.id)}
+          >
+            {slot.name}
+          </button>
+        ))}
+      </div>
+
       <ReactFlow
         nodes={nodes}
         edges={edges}

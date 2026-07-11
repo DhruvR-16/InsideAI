@@ -48,22 +48,32 @@ class Critique(BaseModel):
 class WSStageStart(BaseModel):
     event: str = "stage_start"
     stage: str
+    model_slot_id: int = 0
     timestamp: float
 
 class WSStageComplete(BaseModel):
     event: str = "stage_complete"
     stage: str
+    model_slot_id: int = 0
     duration_ms: float
     output: Dict[str, Any]
     timestamp: float
+    # Educational Context
+    system_prompt: Optional[str] = None
+    user_prompt: Optional[str] = None
+    raw_llm_response: Optional[str] = None
+    active_key_masked: Optional[str] = None
+    provider_used: Optional[str] = None
 
 class WSToken(BaseModel):
     event: str = "token"
     stage: str = "writer"
+    model_slot_id: int = 0
     text_chunk: str
 
 class WSPipelineComplete(BaseModel):
     event: str = "pipeline_complete"
+    model_slot_id: int = 0
     total_duration_ms: float
     final_output: str
     confidence_score: int

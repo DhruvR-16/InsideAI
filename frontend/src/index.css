@@ -204,6 +204,58 @@ body {
   border-bottom-left-radius: 2px;
 }
 
+/* Model Tab Selection inside assistant bubbles */
+.model-tabs-bar {
+  display: flex;
+  gap: 4px;
+  border-bottom: 1px solid var(--border-light);
+  margin-bottom: 10px;
+  padding-bottom: 6px;
+}
+
+.model-tab-btn {
+  background: none;
+  border: none;
+  border-radius: 4px;
+  padding: 4px 8px;
+  font-size: 0.68rem;
+  font-weight: 500;
+  color: var(--text-secondary);
+  cursor: pointer;
+  display: flex;
+  align-items: center;
+  gap: 5px;
+  transition: background-color 0.15s, color 0.15s;
+}
+
+.model-tab-btn:hover {
+  background-color: var(--bg-app);
+  color: var(--text-primary);
+}
+
+.model-tab-btn.active {
+  background-color: var(--accent-light);
+  color: var(--accent-color);
+  font-weight: 600;
+}
+
+.status-dot {
+  width: 5px;
+  height: 5px;
+  border-radius: 50%;
+  display: inline-block;
+  flex-shrink: 0;
+}
+
+.status-dot.pulsing {
+  animation: pulse-dot 1.2s infinite ease-in-out;
+}
+
+@keyframes pulse-dot {
+  0%, 100% { opacity: 0.4; transform: scale(0.9); }
+  50% { opacity: 1; transform: scale(1.2); }
+}
+
 /* Chat message text spacing */
 .chat-bubble.assistant p {
   margin-bottom: 0.65rem;
@@ -975,4 +1027,59 @@ body {
   color: #3a3a3c;
   overflow-x: auto;
   max-height: 130px;
+}
+
+/* Graph tab switcher styling */
+.graph-tabs-container {
+  position: absolute;
+  top: 1rem;
+  right: 1rem;
+  display: flex;
+  gap: 4px;
+  z-index: 5;
+  background: rgba(255, 255, 255, 0.9);
+  backdrop-filter: blur(10px);
+  border: 1px solid var(--border-light);
+  border-radius: 8px;
+  padding: 3px;
+  box-shadow: 0 4px 15px rgba(0, 0, 0, 0.02);
+}
+
+.graph-tab-btn {
+  background: none;
+  border: none;
+  border-radius: 6px;
+  padding: 6px 12px;
+  font-size: 0.68rem;
+  font-weight: 500;
+  color: var(--text-secondary);
+  cursor: pointer;
+  transition: background-color 0.15s, color 0.15s;
+}
+
+.graph-tab-btn:hover {
+  background-color: var(--bg-app);
+  color: var(--text-primary);
+}
+
+.graph-tab-btn.active {
+  background-color: var(--primary-color);
+  color: #ffffff;
+  font-weight: 600;
+}
+
+/* Inspector prompts and raw outputs styling */
+.prompt-pre {
+  background: #f4f4f6;
+  border: 1px solid var(--border-light);
+  border-radius: 8px;
+  padding: 8px 10px;
+  font-family: monospace;
+  font-size: 0.65rem;
+  color: #3a3a3c;
+  overflow-x: auto;
+  white-space: pre-wrap;
+  word-wrap: break-word;
+  max-height: 250px;
+  margin-top: 5px;
 }
