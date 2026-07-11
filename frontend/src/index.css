@@ -1078,3 +1078,50 @@ body {
   max-height: 250px;
   margin-top: 5px;
 }
+
+/* Execution Timeline Extensions */
+.execution-timeline-container {
+  scrollbar-width: thin;
+  scrollbar-color: var(--border-light) transparent;
+}
+
+.execution-timeline-container::-webkit-scrollbar {
+  width: 4px;
+}
+
+.execution-timeline-container::-webkit-scrollbar-thumb {
+  background: var(--border-light);
+  border-radius: 4px;
+}
+
+.timeline-card-output {
+  margin-top: 8px;
+  background: #fafafa;
+  border: 1px solid var(--border-light);
+  border-radius: 6px;
+  padding: 8px 10px;
+  font-family: inherit;
+  color: var(--text-primary);
+  line-height: 1.4;
+}
+
+/* Pulsing Dot animation for active stage card */
+.pulsing-dot-inner {
+  width: 6px;
+  height: 6px;
+  background-color: var(--accent-color);
+  border-radius: 50%;
+  display: inline-block;
+  animation: pulse-active 1.4s infinite ease-in-out;
+}
+
+@keyframes pulse-active {
+  0%, 100% {
+    transform: scale(0.75);
+    opacity: 0.5;
+  }
+  50% {
+    transform: scale(1.3);
+    opacity: 1;
+  }
+}

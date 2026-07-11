@@ -15,6 +15,7 @@ import {
 import FlowGraph from './components/FlowGraph';
 import InspectorPanel from './components/InspectorPanel';
 import MetricsPanel from './components/MetricsPanel';
+import ExecutionTimeline from './components/ExecutionTimeline';
 
 // Simple Markdown to HTML parser for streaming output
 function renderMarkdown(text) {
@@ -62,6 +63,7 @@ export default function App() {
 
 
   const [selectedMessageId, setSelectedMessageId] = useState(null);
+  const [viewMode, setViewMode] = useState('timeline'); // 'timeline' | 'graph'
   
   // Floating panels state
   const [selectedNode, setSelectedNode] = useState(null);
@@ -592,39 +594,93 @@ export default function App() {
         </section>
 
         {/* Right Panel: Interactive Graph & Metrics */}
-        <section className="canvas-container">
+        <section className="canvas-container" style={{ display: 'flex', flexDirection: 'column', height: '100%' }}>
           
-          {/* Floating Live thinking indicator */}
-          {running && (
-            <div className="thinking-status-floating">
-              <span className="pulse-dot">
-                <span className="pulse-ping active"></span>
-                <span className="pulse-core active"></span>
-              </span>
-              <span className="thinking-status-text">
-                Thinking: {activeGraphCurrentStage.replace('_', ' ')}
-              </span>
+          {/* Header switch buttons */}
+          <div className="canvas-header-toggle" style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', padding: '10px 16px', borderBottom: '1px solid var(--border-light)', backgroundColor: '#ffffff', flexShrink: 0 }}>
+            <span style={{ fontSize: '0.74rem', fontWeight: 600, color: 'var(--text-secondary)' }}>Orchestrator Monitor</span>
+            <div className="toggle-buttons-wrapper" style={{ display: 'flex', background: '#f1f1f3', padding: '2px', borderRadius: '6px', border: '1px solid var(--border-light)' }}>
+              <button 
+                onClick={() => setViewMode('timeline')} 
+                style={{ 
+                  fontSize: '0.66rem', 
+                  fontWeight: 600, 
+                  padding: '4px 10px', 
+                  borderRadius: '4px', 
+                  background: viewMode === 'timeline' ? '#ffffff' : 'transparent', 
+                  color: viewMode === 'timeline' ? 'var(--accent-color)' : 'var(--text-secondary)',
+                  border: 'none', 
+                  boxShadow: viewMode === 'timeline' ? '0 1px 3px rgba(0,0,0,0.08)' : 'none',
+                  cursor: 'pointer',
+                  transition: 'all 0.15s'
+                }}
+              >
+                Pipeline Trace (Inline)
+              </button>
+              <button 
+                onClick={() => setViewMode('graph')} 
+                style={{ 
+                  fontSize: '0.66rem', 
+                  fontWeight: 600, 
+                  padding: '4px 10px', 
+                  borderRadius: '4px', 
+                  background: viewMode === 'graph' ? '#ffffff' : 'transparent', 
+                  color: viewMode === 'graph' ? 'var(--accent-color)' : 'var(--text-secondary)',
+                  border: 'none', 
+                  boxShadow: viewMode === 'graph' ? '0 1px 3px rgba(0,0,0,0.08)' : 'none',
+                  cursor: 'pointer',
+                  transition: 'all 0.15s'
+                }}
+              >
+                DAG Nodes Map
+              </button>
             </div>
-          )}
+          </div>
 
-          {/* Floating metrics summary panel */}
-          {activeMetrics && !activeMetrics.running && activeMetrics.events?.length > 0 && (
-            <div className="metrics-panel-floating">
-              <MetricsPanel 
-                events={activeMetrics.events} 
-                totalTime={activeMetrics.totalTime} 
-                confidence={activeMetrics.confidence} 
+          <div style={{ flex: 1, position: 'relative', overflow: 'hidden' }}>
+            {viewMode === 'timeline' ? (
+              <ExecutionTimeline 
+                events={activeGraphEvents} 
+                currentStage={activeGraphCurrentStage} 
+                running={running} 
+                query={chatMessages.find(m => m.id === selectedMessageId)?.content || query} 
               />
-            </div>
-          )}
+            ) : (
+              <>
+                {/* Floating Live thinking indicator */}
+                {running && (
+                  <div className="thinking-status-floating">
+                    <span className="pulse-dot">
+                      <span className="pulse-ping active"></span>
+                      <span className="pulse-core active"></span>
+                    </span>
+                    <span className="thinking-status-text">
+                      Thinking: {activeGraphCurrentStage.replace('_', ' ')}
+                    </span>
+                  </div>
+                )}
 
-          {/* React Flow node graph */}
-          <FlowGraph 
-            events={activeGraphEvents} 
-            currentStage={activeGraphCurrentStage} 
-            onNodeSelect={handleNodeSelect}
-            selectedNodeId={selectedNode?.id}
-          />
+                {/* Floating metrics summary panel */}
+                {activeMetrics && !activeMetrics.running && activeMetrics.events?.length > 0 && (
+                  <div className="metrics-panel-floating">
+                    <MetricsPanel 
+                      events={activeMetrics.events} 
+                      totalTime={activeMetrics.totalTime} 
+                      confidence={activeMetrics.confidence} 
+                    />
+                  </div>
+                )}
+
+                {/* React Flow node graph */}
+                <FlowGraph 
+                  events={activeGraphEvents} 
+                  currentStage={activeGraphCurrentStage} 
+                  onNodeSelect={handleNodeSelect}
+                  selectedNodeId={selectedNode?.id}
+                />
+              </>
+            )}
+          </div>
         </section>
 
         {/* Inspector Panel - Rendered inline in the 3rd column */}
