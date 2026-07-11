@@ -1,0 +1,8 @@
+fastapi
+uvicorn
+pydantic
+groq
+chromadb
+websockets
+python-dotenv
+httpx
