@@ -1,0 +1,504 @@
+import React, { useState, useEffect, useRef } from 'react';
+import { 
+  Send, 
+  Terminal, 
+  Wifi,
+  WifiOff,
+  Sparkles,
+  ArrowRight,
+  ChevronRight,
+  Cpu,
+  Clock,
+  ShieldCheck
+} from 'lucide-react';
+import FlowGraph from './components/FlowGraph';
+import InspectorPanel from './components/InspectorPanel';
+import MetricsPanel from './components/MetricsPanel';
+
+// Simple Markdown to HTML parser for streaming output
+function renderMarkdown(text) {
+  if (!text) return '';
+  let html = text
+    .replace(/&/g, '&amp;')
+    .replace(/</g, '&lt;')
+    .replace(/>/g, '&gt;');
+  
+  // Headers
+  html = html.replace(/^# (.*$)/gim, '<h1 class="writer-output-markup h1">$1</h1>');
+  html = html.replace(/^## (.*$)/gim, '<h2 class="writer-output-markup h2">$1</h2>');
+  html = html.replace(/^### (.*$)/gim, '<h3 class="writer-output-markup h3">$1</h3>');
+  
+  // Bold
+  html = html.replace(/\*\*(.*?)\*\*/g, '<strong style="font-weight: 600; color: var(--text-primary);">$1</strong>');
+  
+  // Lists
+  html = html.replace(/^\* (.*$)/gim, '<li class="writer-output-markup li">$1</li>');
+  html = html.replace(/^- (.*$)/gim, '<li class="writer-output-markup li">$1</li>');
+  
+  // Code sections
+  html = html.replace(/`(.*?)`/g, '<code style="background-color: var(--bg-app); border: 1px solid var(--border-light); color: var(--accent-color); padding: 2px 4px; border-radius: 4px; font-family: monospace; font-size: 0.75rem;">$1</code>');
+  
+  // Linebreaks
+  html = html.replaceAll('\n', '<br/>');
+
+  return html;
+}
+
+const QUICK_STARTS = [
+  "Explain transformers and self-attention in simple terms.",
+  "How does superposition work in quantum computing?",
+  "What is CRISPR-Cas9 and how is it used in editing DNA?",
+  "Explain public-key cryptography and asymmetric keys."
+];
+
+export default function App() {
+  const [query, setQuery] = useState('');
+  const [running, setRunning] = useState(false);
+  const [chatMessages, setChatMessages] = useState([]);
+  
+  // Custom API key override
+  const [userApiKey, setUserApiKey] = useState(() => localStorage.getItem('user_groq_api_key') || '');
+
+  // Graph state: mirrors either the live run or the selected message trace
+  const [activeGraphEvents, setActiveGraphEvents] = useState([]);
+  const [activeGraphCurrentStage, setActiveGraphCurrentStage] = useState('idle');
+  const [selectedMessageId, setSelectedMessageId] = useState(null);
+  
+  // Floating panels state
+  const [selectedNode, setSelectedNode] = useState(null);
+  
+  // Connection and Session
+  const [wsConnected, setWsConnected] = useState(false);
+  const [activeSessionId, setActiveSessionId] = useState(() => `session_${Math.random().toString(36).substr(2, 9)}`);
+  
+  const wsRef = useRef(null);
+  const messagesEndRef = useRef(null);
+
+  // Connect to WebSocket
+  useEffect(() => {
+    connectWS();
+    return () => {
+      if (wsRef.current) wsRef.current.close();
+    };
+  }, [activeSessionId, userApiKey]);
+
+  // Scroll to bottom of chat list
+  useEffect(() => {
+    if (messagesEndRef.current) {
+      messagesEndRef.current.scrollIntoView({ behavior: 'smooth' });
+    }
+  }, [chatMessages, running]);
+
+  const connectWS = () => {
+    if (wsRef.current) {
+      wsRef.current.close();
+    }
+
+    const keyParam = userApiKey ? `?api_key=${encodeURIComponent(userApiKey)}` : '';
+    const wsUrl = `ws://localhost:8000/ws/${activeSessionId}${keyParam}`;
+    const ws = new WebSocket(wsUrl);
+
+    ws.onopen = () => {
+      setWsConnected(true);
+      console.log('Connected to Inside AI WebSocket');
+    };
+
+    ws.onclose = () => {
+      setWsConnected(false);
+      console.log('Disconnected from Inside AI WebSocket');
+      setTimeout(connectWS, 3000);
+    };
+
+    ws.onerror = (err) => {
+      console.error('WebSocket Error:', err);
+    };
+
+    ws.onmessage = (event) => {
+      const data = JSON.parse(event.data);
+      handleWSMessage(data);
+    };
+
+    wsRef.current = ws;
+  };
+
+  const handleWSMessage = (data) => {
+    if (data.event === 'stage_start') {
+      setActiveGraphCurrentStage(data.stage);
+      
+      // Update active message running status
+      setChatMessages(prev => prev.map((msg, idx) => {
+        if (idx === prev.length - 1 && msg.role === 'assistant') {
+          return { ...msg, currentStage: data.stage };
+        }
+        return msg;
+      }));
+    } else if (data.event === 'stage_complete') {
+      setActiveGraphEvents(prev => [...prev, data]);
+      
+      setChatMessages(prev => prev.map((msg, idx) => {
+        if (idx === prev.length - 1 && msg.role === 'assistant') {
+          const updatedEvents = [...(msg.events || []), data];
+          let updatedMeta = {};
+          if (data.stage === 'logic_critic' || data.stage === 'logic_critic_revision') {
+            updatedMeta.confidence = data.output.confidence_score;
+          }
+          return { ...msg, events: updatedEvents, ...updatedMeta };
+        }
+        return msg;
+      }));
+    } else if (data.event === 'token') {
+      setChatMessages(prev => prev.map((msg, idx) => {
+        if (idx === prev.length - 1 && msg.role === 'assistant') {
+          return { ...msg, content: msg.content + data.text_chunk };
+        }
+        return msg;
+      }));
+    } else if (data.event === 'pipeline_complete') {
+      setActiveGraphCurrentStage('complete');
+      setActiveGraphEvents(prev => [...prev, data]);
+      setRunning(false);
+
+      setChatMessages(prev => prev.map((msg, idx) => {
+        if (idx === prev.length - 1 && msg.role === 'assistant') {
+          return { 
+            ...msg, 
+            content: data.final_output,
+            totalTime: data.total_duration_ms,
+            confidence: data.confidence_score,
+            events: [...(msg.events || []), data],
+            currentStage: 'complete',
+            running: false
+          };
+        }
+        return msg;
+      }));
+    } else if (data.event === 'error') {
+      setRunning(false);
+      setActiveGraphCurrentStage('error');
+      alert(`Pipeline error: ${data.message}`);
+      
+      setChatMessages(prev => prev.map((msg, idx) => {
+        if (idx === prev.length - 1 && msg.role === 'assistant') {
+          return { 
+            ...msg, 
+            content: `Error: ${data.message}`,
+            currentStage: 'error',
+            running: false
+          };
+        }
+        return msg;
+      }));
+    }
+  };
+
+  const handleSend = (textToSend) => {
+    const prompt = textToSend || query;
+    if (!prompt.trim() || running) return;
+
+    if (!wsConnected) {
+      alert("Offline. Reconnecting to backend...");
+      connectWS();
+      return;
+    }
+
+    // Reset layout for new run
+    setActiveGraphEvents([]);
+    setActiveGraphCurrentStage('client_query');
+    setSelectedNode(null);
+    setSelectedMessageId(null);
+    setRunning(true);
+    setQuery('');
+
+    const assistantMsgId = `assistant_${Math.random().toString(36).substr(2, 9)}`;
+
+    setChatMessages(prev => [
+      ...prev,
+      { id: `user_${Date.now()}`, role: 'user', content: prompt },
+      { 
+        id: assistantMsgId, 
+        role: 'assistant', 
+        content: '', 
+        events: [], 
+        totalTime: 0, 
+        confidence: null,
+        currentStage: 'intent_analyzer',
+        running: true,
+        queryRef: prompt
+      }
+    ]);
+
+    setSelectedMessageId(assistantMsgId);
+    wsRef.current.send(JSON.stringify({ query: prompt }));
+  };
+
+  // Inspect the steps for a past message
+  const handleSelectMessageTrace = (msg) => {
+    if (running || msg.role !== 'assistant') return;
+    
+    setSelectedMessageId(msg.id);
+    setActiveGraphEvents(msg.events || []);
+    setActiveGraphCurrentStage(msg.currentStage || 'complete');
+    setSelectedNode(null);
+  };
+
+  const handleNodeSelect = (reactflowNode) => {
+    const nodeStageId = reactflowNode.id;
+    let matchingEvent = null;
+
+    if (nodeStageId === 'planner') {
+      matchingEvent = activeGraphEvents.find(e => e.stage === 'planner_revision') || 
+                      activeGraphEvents.find(e => e.stage === 'planner');
+    } else if (nodeStageId === 'logic_critic') {
+      matchingEvent = activeGraphEvents.find(e => e.stage === 'logic_critic_revision') || 
+                      activeGraphEvents.find(e => e.stage === 'logic_critic');
+    } else {
+      matchingEvent = activeGraphEvents.find(e => e.stage === nodeStageId);
+    }
+
+    // Find the original query text associated with the currently viewed trace
+    let queryText = "";
+    if (selectedMessageId) {
+      const selectedMsg = chatMessages.find(m => m.id === selectedMessageId);
+      if (selectedMsg) {
+        queryText = selectedMsg.queryRef || "";
+      }
+    }
+
+    if (matchingEvent) {
+      setSelectedNode({
+        id: nodeStageId,
+        data: {
+          label: reactflowNode.data.label,
+          output: matchingEvent.output,
+          input: queryText
+        }
+      });
+    } else if (nodeStageId === 'user_query') {
+      setSelectedNode({
+        id: 'user_query',
+        data: {
+          label: 'Client Input',
+          output: { core_question: queryText },
+          input: queryText
+        }
+      });
+    } else {
+      setSelectedNode({
+        id: nodeStageId,
+        data: {
+          label: reactflowNode.data.label,
+          output: null,
+          input: queryText
+        }
+      });
+    }
+  };
+
+  // Find currently active assistant metrics
+  const activeMetrics = (() => {
+    if (selectedMessageId) {
+      return chatMessages.find(m => m.id === selectedMessageId);
+    }
+    // fallback to last
+    const assists = chatMessages.filter(m => m.role === 'assistant');
+    return assists[assists.length - 1];
+  })();
+
+  return (
+    <div className="app-container">
+      {/* Header */}
+      <header className="header">
+        <div className="brand-container">
+          <h1 className="brand">Inside AI</h1>
+          <span className="version-badge">Live Transparent pipeline</span>
+        </div>
+        <div style={{ display: 'flex', alignItems: 'center', gap: 12 }}>
+          <input
+            type="password"
+            value={userApiKey}
+            onChange={(e) => {
+              setUserApiKey(e.target.value);
+              localStorage.setItem('user_groq_api_key', e.target.value);
+            }}
+            placeholder="Override Groq API Key (Optional)"
+            style={{
+              fontSize: '0.72rem',
+              padding: '6px 12px',
+              width: 210,
+              border: '1px solid var(--border-light)',
+              borderRadius: '6px',
+              outline: 'none',
+              background: '#ffffff',
+              color: 'var(--text-primary)',
+              fontFamily: 'monospace',
+              transition: 'border-color 0.2s',
+            }}
+          />
+          {wsConnected ? (
+            <div className="connection-status connected">
+              <Wifi style={{ width: 12, height: 12 }} />
+              <span>Connected</span>
+            </div>
+          ) : (
+            <div className="connection-status disconnected">
+              <WifiOff style={{ width: 12, height: 12 }} />
+              <span>Offline (Reconnecting)</span>
+            </div>
+          )}
+        </div>
+      </header>
+
+      {/* Main Layout */}
+      <main className="main-layout">
+        
+        {/* Left Panel: Continuous Chatbot */}
+        <section className="chat-column">
+          <div className="chat-header-section">
+            <span className="chat-header-title">
+              <Terminal style={{ width: 13, height: 13, color: 'var(--text-secondary)' }} />
+              <span>Pipeline chat</span>
+            </span>
+          </div>
+
+          <div className="chat-messages-container">
+            {chatMessages.length === 0 ? (
+              <div className="chat-welcome-container">
+                <div className="chat-welcome-logo">
+                  <Sparkles size={20} />
+                </div>
+                <h2 className="chat-welcome-title">Watch the AI Think</h2>
+                <p className="chat-welcome-desc">
+                  Ask a question to see the 6-stage orchestration pipeline retrieve documents, draft plans, critique itself, and generate output.
+                </p>
+                <div style={{ display: 'flex', flexDirection: 'column', gap: 8, width: '100%', marginTop: 24 }}>
+                  {QUICK_STARTS.map((qs, i) => (
+                    <button
+                      key={i}
+                      onClick={() => handleSend(qs)}
+                      className="history-item"
+                      style={{ padding: '10px 12px' }}
+                    >
+                      <span className="history-query" style={{ fontSize: '0.74rem' }}>{qs}</span>
+                      <ChevronRight size={14} style={{ color: 'var(--text-muted)' }} />
+                    </button>
+                  ))}
+                </div>
+              </div>
+            ) : (
+              chatMessages.map((msg) => (
+                <div key={msg.id} className={`chat-message-row ${msg.role}`}>
+                  <div 
+                    className={`chat-bubble ${msg.role} ${selectedMessageId === msg.id ? 'selected-chat-bubble' : ''}`}
+                    onClick={() => handleSelectMessageTrace(msg)}
+                    style={{ 
+                      cursor: msg.role === 'assistant' ? 'pointer' : 'default',
+                      border: selectedMessageId === msg.id ? '1px solid var(--accent-color)' : ''
+                    }}
+                  >
+                    {msg.role === 'user' ? (
+                      <p style={{ margin: 0 }}>{msg.content}</p>
+                    ) : (
+                      <>
+                        <div 
+                          className="writer-output-markup"
+                          dangerouslySetInnerHTML={{ __html: renderMarkdown(msg.content || 'Generating plan outline...') }}
+                        />
+                        {!msg.running && msg.currentStage === 'complete' && (
+                          <div className="chat-bubble-footer">
+                            <span className="chat-trace-btn">
+                              <Cpu size={11} />
+                              <span>{selectedMessageId === msg.id ? 'Viewing Thinking Graph' : 'Click to inspect steps'}</span>
+                            </span>
+                            <span className="chat-trace-meta">
+                              {msg.totalTime ? `${(msg.totalTime / 1000).toFixed(2)}s` : ''} 
+                              {msg.confidence ? ` • Score: ${msg.confidence}%` : ''}
+                            </span>
+                          </div>
+                        )}
+                      </>
+                    )}
+                  </div>
+                </div>
+              ))
+            )}
+            <div ref={messagesEndRef} />
+          </div>
+
+          {/* Chat input box */}
+          <div className="chat-input-area">
+            <form 
+              onSubmit={(e) => { e.preventDefault(); handleSend(); }} 
+              className="chat-input-wrapper"
+            >
+              <textarea
+                value={query}
+                onChange={(e) => setQuery(e.target.value)}
+                onKeyDown={(e) => {
+                  if (e.key === 'Enter' && !e.shiftKey) {
+                    e.preventDefault();
+                    handleSend();
+                  }
+                }}
+                placeholder="Ask a technical or general question..."
+                disabled={running}
+                rows={2}
+                className="chat-textbox"
+              />
+              <button 
+                type="submit" 
+                disabled={running || !query.trim()}
+                className="chat-send-btn"
+              >
+                <Send size={16} />
+              </button>
+            </form>
+          </div>
+        </section>
+
+        {/* Right Panel: Interactive Graph & Metrics */}
+        <section className="canvas-container">
+          
+          {/* Floating Live thinking indicator */}
+          {running && (
+            <div className="thinking-status-floating">
+              <span className="pulse-dot">
+                <span className="pulse-ping active"></span>
+                <span className="pulse-core active"></span>
+              </span>
+              <span className="thinking-status-text">
+                Thinking: {activeGraphCurrentStage.replace('_', ' ')}
+              </span>
+            </div>
+          )}
+
+          {/* Floating metrics summary panel */}
+          {activeMetrics && !activeMetrics.running && activeMetrics.events?.length > 0 && (
+            <div className="metrics-panel-floating">
+              <MetricsPanel 
+                events={activeMetrics.events} 
+                totalTime={activeMetrics.totalTime} 
+                confidence={activeMetrics.confidence} 
+              />
+            </div>
+          )}
+
+          {/* React Flow node graph */}
+          <FlowGraph 
+            events={activeGraphEvents} 
+            currentStage={activeGraphCurrentStage} 
+            onNodeSelect={handleNodeSelect}
+            selectedNodeId={selectedNode?.id}
+          />
+
+          {/* Inspector Panel */}
+          {selectedNode && (
+            <InspectorPanel 
+              node={selectedNode} 
+              onClose={() => setSelectedNode(null)} 
+            />
+          )}
+        </section>
+      </main>
+    </div>
+  );
+}
