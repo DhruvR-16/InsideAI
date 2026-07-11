@@ -30,22 +30,8 @@ MAX_RETRIES = 3
 INITIAL_BACKOFF = 2.0  # seconds
 MAX_TOKENS = int(os.getenv("MAX_TOKENS", "400"))
 
-# Model mappings for up to 3 educational comparison slots
-SLOT_MODELS = {
-    0: "llama-3.1-8b-instant",  # Llama 3.1 8B
-    1: "gemma2-9b-it",          # Gemma 2 9B
-    2: "llama-3.2-3b-preview"   # Llama 3.2 3B
-}
-
-SLOT_OLLAMA_MODELS = {
-    0: "llama3.2",
-    1: "gemma2:2b",
-    2: "qwen2.5:1.5b"
-}
-
 # Context variables isolated per async task loop
-current_model_slot = contextvars.ContextVar("current_model_slot", default=0)
-current_api_keys_pool = contextvars.ContextVar("current_api_keys_pool", default={0: [], 1: [], 2: []})
+api_keys_pool = contextvars.ContextVar("api_keys_pool", default=[])
 
 last_system_prompt = contextvars.ContextVar("last_system_prompt", default=None)
 last_user_prompt = contextvars.ContextVar("last_user_prompt", default=None)
@@ -53,19 +39,18 @@ last_raw_response = contextvars.ContextVar("last_raw_response", default=None)
 last_key_used = contextvars.ContextVar("last_key_used", default=None)
 last_provider = contextvars.ContextVar("last_provider", default=None)
 
-# In-memory session history store per session and model slot
-# Schema: { f"{session_id}_{slot_id}": [MemoryExchange] }
+# In-memory session history store per session
+# Schema: { session_id: [MemoryExchange] }
 session_histories: Dict[str, List[MemoryExchange]] = {}
 groq_client = None
-active_key_pointers = {0: 0, 1: 0, 2: 0}
+active_key_pointer = 0
 
 def get_groq_client() -> AsyncGroq:
-    global groq_client
-    slot = current_model_slot.get()
-    pool = current_api_keys_pool.get().get(slot, [])
+    global groq_client, active_key_pointer
+    pool = api_keys_pool.get()
     
     if pool:
-        pointer = active_key_pointers[slot] % len(pool)
+        pointer = active_key_pointer % len(pool)
         active_key = pool[pointer]
         # Mask the key for logs
         masked = active_key[:6] + "..." + active_key[-4:] if len(active_key) > 10 else "..."
@@ -126,25 +111,25 @@ async def call_groq_with_retry(
             last_raw_response.set(content)
             return content
         except RateLimitError as e:
-            slot = current_model_slot.get()
-            pool = current_api_keys_pool.get().get(slot, [])
+            global active_key_pointer
+            pool = api_keys_pool.get()
             
             # Key rotation fallback
             if pool and len(pool) > 1:
-                active_key_pointers[slot] = (active_key_pointers[slot] + 1) % len(pool)
-                print(f"Slot {slot} rate limited. Rotating to key index {active_key_pointers[slot]}...")
+                active_key_pointer = (active_key_pointer + 1) % len(pool)
+                print(f"Rate limited. Rotating to key index {active_key_pointer}...")
                 # Immediately retry with the next key, bypassing wait
                 return await call_groq_with_retry(messages, model, json_mode, stream)
             
             # Try falling back to the stable Groq model first before raising to trigger Ollama
             if model != DEFAULT_MODEL:
-                print(f"Slot {slot} model {model} rate-limited on Groq. Trying stable default {DEFAULT_MODEL} on Groq...")
+                print(f"Model {model} rate-limited on Groq. Trying stable default {DEFAULT_MODEL} on Groq...")
                 return await call_groq_with_retry(messages, DEFAULT_MODEL, json_mode, stream)
             
             # Fail fast if no rotation keys are configured in hybrid mode to avoid sequential sleep delays
             provider = os.getenv("LLM_PROVIDER", "hybrid").lower()
             if provider == "hybrid":
-                print(f"Slot {slot} rate limited on Groq with no rotation options. Failing fast to trigger local Ollama fallback immediately.")
+                print("Rate limited on Groq with no rotation options. Failing fast to trigger local Ollama fallback immediately.")
                 raise e
                 
             if attempt == MAX_RETRIES - 1:
@@ -169,10 +154,9 @@ async def call_ollama(
 ) -> Any:
     """Calls local Ollama instance via its OpenAI-compatible API."""
     url = f"{OLLAMA_HOST}/v1/chat/completions"
-    slot = current_model_slot.get()
     
     if not model:
-        model = SLOT_OLLAMA_MODELS.get(slot, OLLAMA_MODEL)
+        model = OLLAMA_MODEL
         
     payload = {
         "model": model,
@@ -296,10 +280,8 @@ async def call_llm(
 ) -> Any:
     """Unified interface to route calls between Groq and local Ollama based on provider configuration."""
     provider = os.getenv("LLM_PROVIDER", "hybrid").lower()
-    slot = current_model_slot.get()
-    
     if not model:
-        model = SLOT_MODELS.get(slot, DEFAULT_MODEL)
+        model = DEFAULT_MODEL
     
     if provider == "ollama":
         return await call_ollama(messages, json_mode=json_mode, stream=stream)
@@ -340,13 +322,10 @@ async def analyze_intent(query: str) -> IntentAnalysis:
 
 # --- 2. Memory Stage ---
 async def retrieve_memory(query: str, session_id: str, requires_memory: bool) -> MemoryContext:
-    slot_id = current_model_slot.get()
-    storage_key = f"{session_id}_{slot_id}"
-    
-    if not requires_memory or storage_key not in session_histories or not session_histories[storage_key]:
+    if not requires_memory or session_id not in session_histories or not session_histories[session_id]:
         return MemoryContext(relevant_history=[], found_context=False)
     
-    history = session_histories[storage_key]
+    history = session_histories[session_id]
     
     system_prompt = (
         "You are a memory context retriever. Given the user's new query and the conversation history, "
@@ -516,15 +495,14 @@ async def generate_response_stream(
     async for token in stream_response:
         yield token
 
-# --- Internal Pipeline Implementation ---
-async def _run_pipeline_internal(
+# --- Internal Pipeline Implementation async def _run_pipeline_internal(
     query: str,
     session_id: str,
-    event_callback: Callable[[Dict[str, Any]], Any],
-    slot_id: int
+    event_callback: Callable[[Dict[str, Any]], Any]
 ) -> str:
-    """Internal implementation of the orchestrator DAG pipeline tagged by slot ID."""
+    """Internal implementation of the orchestrator DAG pipeline."""
     pipeline_start_time = time.time()
+    slot_id = 0  # Maintain standard slot 0 reporting for WebSocket schemas
     
     # Stage helper to wrap latency measuring and educational trace event emitting
     async def run_stage(stage_name: str, coro_func: Callable[[], Any]) -> Any:
@@ -600,7 +578,7 @@ async def _run_pipeline_internal(
     
     # Revision cycle
     if not critique.plan_approved:
-        print(f"[Slot {slot_id}] Plan rejected by critic. Starting revision cycle...")
+        print("Plan rejected by critic. Starting revision cycle...")
         
         plan = await run_stage(
             "planner_revision", 
@@ -653,15 +631,14 @@ async def _run_pipeline_internal(
         "provider_used": last_provider.get()
     })
     
-    # Update Session Memory per slot
-    storage_key = f"{session_id}_{slot_id}"
-    if storage_key not in session_histories:
-        session_histories[storage_key] = []
-    session_histories[storage_key].append(MemoryExchange(role="user", content=query))
-    session_histories[storage_key].append(MemoryExchange(role="assistant", content=final_response))
+    # Update Session Memory
+    if session_id not in session_histories:
+        session_histories[session_id] = []
+    session_histories[session_id].append(MemoryExchange(role="user", content=query))
+    session_histories[session_id].append(MemoryExchange(role="assistant", content=final_response))
     
-    if len(session_histories[storage_key]) > 20:
-        session_histories[storage_key] = session_histories[storage_key][-20:]
+    if len(session_histories[session_id]) > 20:
+        session_histories[session_id] = session_histories[session_id][-20:]
         
     # Complete pipeline
     pipeline_duration_ms = (time.time() - pipeline_start_time) * 1000
@@ -684,47 +661,18 @@ async def run_pipeline(
     event_callback: Callable[[Dict[str, Any]], Any],
     custom_api_key: Optional[str] = None
 ) -> str:
-    """Runs up to 3 model slots concurrently, distributing provided API keys."""
+    """Runs a single model visual pipeline."""
     # Split the override key input if comma-separated
     keys = [k.strip() for k in custom_api_key.split(",") if k.strip()] if custom_api_key else []
+    api_keys_pool.set(keys)
     
-    # Distribute keys to slot pools:
-    # If 1 key provided, distribute to all slots.
-    # If multiple, round-robin them.
-    slot_keys = {0: [], 1: [], 2: []}
-    if len(keys) == 1:
-        slot_keys[0] = [keys[0]]
-        slot_keys[1] = [keys[0]]
-        slot_keys[2] = [keys[0]]
-    elif len(keys) >= 2:
-        for i, k in enumerate(keys):
-            slot_keys[i % 3].append(k)
-
-    current_api_keys_pool.set(slot_keys)
-
-    # Throttled execution task runner to space out parallel API start bounds
-    async def run_slot_pipeline(slot_id: int):
-        # ContextVars isolate automatically in async Tasks
-        current_model_slot.set(slot_id)
-        # Apply a minor stagger to avoid triggering simultaneous RPM limit flags
-        if slot_id > 0:
-            await asyncio.sleep(slot_id * 0.150)
-            
-        try:
-            return await _run_pipeline_internal(query, session_id, event_callback, slot_id)
-        except Exception as e:
-            print(f"Model Slot {slot_id} failed: {e}")
-            await event_callback({
-                "event": "error",
-                "model_slot_id": slot_id,
-                "message": f"Execution failed: {str(e)}"
-            })
-            return ""
-
-    # Execute all slots concurrently
-    results = await asyncio.gather(
-        run_slot_pipeline(0),
-        run_slot_pipeline(1),
-        run_slot_pipeline(2)
-    )
-    return results[0]
+    try:
+        return await _run_pipeline_internal(query, session_id, event_callback)
+    except Exception as e:
+        print(f"Pipeline failed: {e}")
+        await event_callback({
+            "event": "error",
+            "model_slot_id": 0,
+            "message": f"Execution failed: {str(e)}"
+        })
+        return ""
