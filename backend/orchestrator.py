@@ -133,6 +133,12 @@ async def call_groq_with_retry(
                 print(f"Slot {slot} rate limited. Rotating to key index {active_key_pointers[slot]}...")
                 # Immediately retry with the next key, bypassing wait
                 return await call_groq_with_retry(messages, model, json_mode, stream)
+            
+            # Fail fast if no rotation keys are configured in hybrid mode to avoid sequential sleep delays
+            provider = os.getenv("LLM_PROVIDER", "hybrid").lower()
+            if provider == "hybrid":
+                print(f"Slot {slot} rate limited on Groq with no rotation options. Failing fast to trigger local Ollama fallback immediately.")
+                raise e
                 
             if attempt == MAX_RETRIES - 1:
                 print(f"Rate limit exceeded on final attempt: {e}")
@@ -174,7 +180,7 @@ async def call_ollama(
     last_key_used.set("Local Machine (Ollama)")
         
     try:
-        async with httpx.AsyncClient(timeout=90.0) as client:
+        async with httpx.AsyncClient(timeout=15.0) as client:
             if stream:
                 payload["stream"] = True
                 async def text_stream():

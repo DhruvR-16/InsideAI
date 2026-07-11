@@ -72,6 +72,7 @@ export default function App() {
   const [activeSessionId, setActiveSessionId] = useState(() => `session_${Math.random().toString(36).substr(2, 9)}`);
   
   const wsRef = useRef(null);
+  const wsApiKeyRef = useRef(userApiKey);
   const messagesEndRef = useRef(null);
 
   // Find currently inspected assistant message
@@ -102,7 +103,7 @@ export default function App() {
     return () => {
       if (wsRef.current) wsRef.current.close();
     };
-  }, [activeSessionId, userApiKey]);
+  }, [activeSessionId]);
 
   // Scroll to bottom of chat list
   useEffect(() => {
@@ -152,6 +153,7 @@ export default function App() {
       wsRef.current.close();
     }
 
+    wsApiKeyRef.current = userApiKey;
     const keyParam = userApiKey ? `?api_key=${encodeURIComponent(userApiKey)}` : '';
     const wsUrl = `ws://localhost:8000/ws/${activeSessionId}${keyParam}`;
     const ws = new WebSocket(wsUrl);
@@ -393,6 +395,11 @@ export default function App() {
             onChange={(e) => {
               setUserApiKey(e.target.value);
               localStorage.setItem('user_groq_api_key', e.target.value);
+            }}
+            onBlur={() => {
+              if (wsApiKeyRef.current !== userApiKey) {
+                connectWS();
+              }
             }}
             placeholder="Override keys: key1,key2,key3 (optional)"
             style={{
