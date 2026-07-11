@@ -505,7 +505,7 @@ async def generate_response_stream(
     slot_id = 0  # Maintain standard slot 0 reporting for WebSocket schemas
     
     # Stage helper to wrap latency measuring and educational trace event emitting
-    async def run_stage(stage_name: str, coro_func: Callable[[], Any]) -> Any:
+    async def run_stage(stage_name: str, coro_func: Callable[[], Any], extra_complete_metadata: Optional[Dict[str, Any]] = None) -> Any:
         start_time = time.time()
         
         # Reset trace properties for this execution context
@@ -533,7 +533,7 @@ async def generate_response_stream(
         else:
             output_dict = {"text": str(output)}
             
-        await event_callback({
+        payload = {
             "event": "stage_complete",
             "stage": stage_name,
             "model_slot_id": slot_id,
@@ -547,7 +547,11 @@ async def generate_response_stream(
             "raw_llm_response": last_raw_response.get(),
             "active_key_masked": last_key_used.get(),
             "provider_used": last_provider.get()
-        })
+        }
+        if extra_complete_metadata:
+            payload.update(extra_complete_metadata)
+            
+        await event_callback(payload)
         return output
 
     # 1. Intent Analyzer
@@ -579,19 +583,26 @@ async def generate_response_stream(
     # Revision cycle
     if not critique.plan_approved:
         print("Plan rejected by critic. Starting revision cycle...")
+        initial_plan_dump = plan.model_dump() if hasattr(plan, "model_dump") else {}
+        initial_critique_dump = critique.model_dump() if hasattr(critique, "model_dump") else {}
         
-        plan = await run_stage(
+        revised_plan = await run_stage(
             "planner_revision", 
             lambda: generate_plan(
                 query, intent, memory, kb, 
                 critique_feedback="\n".join(critique.issues_found)
-            )
+            ),
+            extra_complete_metadata={"initial_plan": initial_plan_dump}
         )
         
-        critique = await run_stage(
+        revised_critique = await run_stage(
             "logic_critic_revision", 
-            lambda: critique_plan(query, intent, kb, plan)
+            lambda: critique_plan(query, intent, kb, revised_plan),
+            extra_complete_metadata={"initial_critique": initial_critique_dump}
         )
+        
+        plan = revised_plan
+        critique = revised_critique
     
     # 6. Writer (Streaming)
     writer_start_time = time.time()

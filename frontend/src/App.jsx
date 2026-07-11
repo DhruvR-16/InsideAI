@@ -174,6 +174,53 @@ export default function App() {
     wsRef.current = ws;
   };
 
+  const autoSelectStage = (stageId, currentEvents) => {
+    const labels = {
+      'intent_analyzer': '1. Intent Analyzer',
+      'memory': '2. Session Memory',
+      'knowledge_retrieval': '3. Vector Search (RAG)',
+      'planner': '4. Planner',
+      'planner_revision': '4. Planner',
+      'logic_critic': '5. Logic / Critic',
+      'logic_critic_revision': '5. Logic / Critic',
+      'writer': '6. Output Writer'
+    };
+
+    const label = labels[stageId] || stageId;
+    const searchEvents = currentEvents || [];
+    
+    let matchingEvent = null;
+    if (stageId === 'planner' || stageId === 'planner_revision') {
+      matchingEvent = searchEvents.find(e => e.stage === 'planner_revision') || 
+                      searchEvents.find(e => e.stage === 'planner');
+    } else if (stageId === 'logic_critic' || stageId === 'logic_critic_revision') {
+      matchingEvent = searchEvents.find(e => e.stage === 'logic_critic_revision') || 
+                      searchEvents.find(e => e.stage === 'logic_critic');
+    } else {
+      matchingEvent = searchEvents.find(e => e.stage === stageId);
+    }
+
+    const queryText = query || "";
+
+    if (matchingEvent) {
+      setSelectedNode({
+        id: stageId === 'planner_revision' ? 'planner' : (stageId === 'logic_critic_revision' ? 'logic_critic' : stageId),
+        data: {
+          label: label,
+          output: matchingEvent.output,
+          input: queryText,
+          systemPrompt: matchingEvent.system_prompt,
+          userPrompt: matchingEvent.user_prompt,
+          rawLlmResponse: matchingEvent.raw_llm_response,
+          activeKeyMasked: matchingEvent.active_key_masked,
+          providerUsed: matchingEvent.provider_used,
+          initialPlan: matchingEvent.initial_plan,
+          initialCritique: matchingEvent.initial_critique
+        }
+      });
+    }
+  };
+
   const handleWSMessage = (data) => {
     if (data.event === 'stage_start') {
       setChatMessages(prev => prev.map((msg, idx) => {
@@ -185,6 +232,17 @@ export default function App() {
         }
         return msg;
       }));
+      // Auto select the active stage on start as well so the loader displays live
+      setTimeout(() => {
+        setSelectedNode({
+          id: data.stage === 'planner_revision' ? 'planner' : (data.stage === 'logic_critic_revision' ? 'logic_critic' : data.stage),
+          data: {
+            label: data.stage.replace('_', ' ').toUpperCase(),
+            output: null,
+            input: query
+          }
+        });
+      }, 0);
     } else if (data.event === 'stage_complete') {
       setChatMessages(prev => prev.map((msg, idx) => {
         if (idx === prev.length - 1 && msg.role === 'assistant') {
@@ -195,6 +253,8 @@ export default function App() {
           if (data.stage === 'logic_critic' || data.stage === 'logic_critic_revision') {
             updated.confidence = data.output.confidence_score;
           }
+          // Auto select completed stage metadata
+          setTimeout(() => autoSelectStage(data.stage, updated.events), 0);
           return updated;
         }
         return msg;
@@ -313,7 +373,9 @@ export default function App() {
           userPrompt: matchingEvent.user_prompt,
           rawLlmResponse: matchingEvent.raw_llm_response,
           activeKeyMasked: matchingEvent.active_key_masked,
-          providerUsed: matchingEvent.provider_used
+          providerUsed: matchingEvent.provider_used,
+          initialPlan: matchingEvent.initial_plan,
+          initialCritique: matchingEvent.initial_critique
         }
       });
     } else if (nodeStageId === 'user_query') {
