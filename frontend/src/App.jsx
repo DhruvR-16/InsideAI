@@ -10,7 +10,8 @@ import {
   Cpu,
   Clock,
   ShieldCheck,
-  Loader
+  Loader,
+  Square
 } from 'lucide-react';
 import FlowGraph from './components/FlowGraph';
 import InspectorPanel from './components/InspectorPanel';
@@ -341,6 +342,35 @@ export default function App() {
     wsRef.current.send(JSON.stringify({ query: prompt }));
   };
 
+  const handleStop = () => {
+    if (!running) return;
+
+    // Close the current WebSocket to abort the stream
+    if (wsRef.current) {
+      wsRef.current.onclose = null; // prevent auto-reconnect
+      wsRef.current.close();
+      wsRef.current = null;
+    }
+
+    // Mark the last assistant message as stopped
+    setChatMessages(prev => prev.map((msg, idx) => {
+      if (idx === prev.length - 1 && msg.role === 'assistant') {
+        return {
+          ...msg,
+          text: (msg.text || '') + '\n\n*[Generation stopped by user]*',
+          currentStage: 'complete',
+          running: false
+        };
+      }
+      return msg;
+    }));
+
+    setRunning(false);
+
+    // Reconnect after a short delay so the app is ready for the next query
+    setTimeout(connectWS, 500);
+  };
+
   // Inspect the steps for a past message
   const handleSelectMessageTrace = (msg) => {
     if (running || msg.role !== 'assistant') return;
@@ -582,13 +612,23 @@ export default function App() {
                 rows={2}
                 className="chat-textbox"
               />
-              <button 
-                type="submit" 
-                disabled={running || !query.trim()}
-                className="chat-send-btn"
-              >
-                <Send size={16} />
-              </button>
+              {running ? (
+                <button 
+                  type="button"
+                  onClick={handleStop}
+                  className="chat-send-btn chat-stop-btn"
+                >
+                  <Square size={14} />
+                </button>
+              ) : (
+                <button 
+                  type="submit" 
+                  disabled={!query.trim()}
+                  className="chat-send-btn"
+                >
+                  <Send size={16} />
+                </button>
+              )}
             </form>
           </div>
         </section>
