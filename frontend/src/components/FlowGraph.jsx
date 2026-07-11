@@ -4,7 +4,9 @@ import {
   Background, 
   Controls, 
   Position,
-  Handle
+  Handle,
+  ReactFlowProvider,
+  useReactFlow
 } from '@xyflow/react';
 import '@xyflow/react/dist/style.css';
 import { 
@@ -91,12 +93,22 @@ const CustomNode = ({ data, id }) => {
   );
 };
 
-export default function FlowGraph({ 
+function FlowGraphInner({ 
   events, 
   currentStage, 
   onNodeSelect, 
   selectedNodeId
 }) {
+  const { fitView } = useReactFlow();
+
+  React.useEffect(() => {
+    // Stagger layout calculation to settle after CSS grid transition animations (300ms)
+    const timer = setTimeout(() => {
+      fitView({ padding: 0.15, duration: 220 });
+    }, 320);
+    return () => clearTimeout(timer);
+  }, [events.length, currentStage, fitView]);
+
   const nodeTypes = useMemo(() => ({ custom: CustomNode }), []);
 
   const nodes = useMemo(() => {
@@ -353,5 +365,13 @@ export default function FlowGraph({
         <Controls showInteractive={false} />
       </ReactFlow>
     </div>
+  );
+}
+
+export default function FlowGraph(props) {
+  return (
+    <ReactFlowProvider>
+      <FlowGraphInner {...props} />
+    </ReactFlowProvider>
   );
 }
